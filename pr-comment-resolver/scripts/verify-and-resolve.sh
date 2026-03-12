@@ -132,17 +132,27 @@ if [[ "$DRY_RUN" == "true" ]]; then
     exit 0
 fi
 
-# NOTE: If reply posts but resolve fails, caller should handle partial state.
-# On retry, a duplicate reply may be posted. No idempotency guard on replies.
-
-# Step 4: Post reply to the comment
-log_info "Posting reply to comment $COMMENT_ID..."
-reply_response=$(gh api "repos/$OWNER/$REPO/pulls/comments/$COMMENT_ID/replies" \
-    -f body="$REPLY_MESSAGE" 2>&1) || {
-    log_error "Failed to post reply: $reply_response"
-    exit 2
+# Idempotency check: See if we already posted a reply with our marker
+# This prevents duplicate replies on retry when reply posted but resolve failed
+log_info "Checking for existing reply..."
+MARKER="<!-- Applied by pr-comment-resolver -->"
+existing_replies=$(gh api "repos/$OWNER/$REPO/pulls/comments/$COMMENT_ID/replies" --paginate 2>&1) || {
+    log_warn "Could not fetch existing replies, proceeding with post"
+    existing_replies="[]"
 }
-log_success "Reply posted"
+
+if echo "$existing_replies" | jq -e ".[] | select(.body | contains(\"$MARKER\"))" > /dev/null 2>&1; then
+    log_warn "Reply already posted (found marker), skipping to resolve"
+else
+    # Step 4: Post reply to the comment
+    log_info "Posting reply to comment $COMMENT_ID..."
+    reply_response=$(gh api "repos/$OWNER/$REPO/pulls/comments/$COMMENT_ID/replies" \
+        -f body="$REPLY_MESSAGE" 2>&1) || {
+        log_error "Failed to post reply: $reply_response"
+        exit 2
+    }
+    log_success "Reply posted"
+fi
 
 # Step 5: Resolve the thread
 log_info "Resolving thread $THREAD_ID..."

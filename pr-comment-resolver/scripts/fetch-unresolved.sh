@@ -134,16 +134,12 @@ fetch_review_threads() {
     local all_threads="[]"
 
     while [[ "$has_next" == "true" ]]; do
-        local cursor_arg=""
-        if [[ -n "$cursor" ]]; then
-            cursor_arg=", after: \"$cursor\""
-        fi
-
-        local query="
-        {
-          repository(owner: \"$OWNER\", name: \"$REPO\") {
-            pullRequest(number: $PR_NUMBER) {
-              reviewThreads(first: 100$cursor_arg) {
+        # Use GraphQL variables to prevent injection (owner/repo could contain special chars)
+        local query='
+        query($owner: String!, $repo: String!, $pr: Int!, $cursor: String) {
+          repository(owner: $owner, name: $repo) {
+            pullRequest(number: $pr) {
+              reviewThreads(first: 100, after: $cursor) {
                 pageInfo {
                   hasNextPage
                   endCursor
@@ -172,10 +168,15 @@ fetch_review_threads() {
               }
             }
           }
-        }"
+        }'
 
         local response
-        response=$(retry_api gh api graphql -f query="$query")
+        # Pass variables separately via -f (strings) and -F (non-strings)
+        if [[ -n "$cursor" ]]; then
+            response=$(retry_api gh api graphql -f query="$query" -f owner="$OWNER" -f repo="$REPO" -F pr="$PR_NUMBER" -f cursor="$cursor")
+        else
+            response=$(retry_api gh api graphql -f query="$query" -f owner="$OWNER" -f repo="$REPO" -F pr="$PR_NUMBER")
+        fi
 
         # Check for errors in response
         if echo "$response" | jq -e '.errors' > /dev/null 2>&1; then

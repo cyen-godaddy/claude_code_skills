@@ -69,6 +69,7 @@ For each comment in JSON output:
 
 ```
 1. Is it a suggestion block? (hasSuggestion: true)
+   ├─ If suggestionCode is null → Treat as interpretive (parse failed, likely CRLF)
    ├─ If outdated: true → Flag "GitHub marked stale"
    └─ Does file at path:line contain originalCode?
        ├─ Yes → Apply suggestionCode directly (replace lines)
@@ -141,8 +142,9 @@ Only after user confirms:
 
 **Step 1: Commit changes**
 ```bash
-# Use template from assets/commit-message.tpl
-git add -A && git commit -m "fix: address PR review comments
+# Stage ONLY the files that were edited during Phase 2 (avoid git add -A)
+# Use the tracked list of applied changes to stage specific files
+git add <list-of-modified-files> && git commit -m "fix: address PR review comments
 
 Applied N changes from PR #123:
 - file.js:55 — [suggestion] Replaced || with ??
