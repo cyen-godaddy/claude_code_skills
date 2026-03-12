@@ -69,10 +69,10 @@ For each comment in JSON output:
 
 ```
 1. Is it a suggestion block? (hasSuggestion: true)
-   ├─ Check: Does file at path:line contain originalCode?
-   │   ├─ Yes → Apply suggestionCode directly (replace lines)
-   │   └─ No → Flag "outdated suggestion — code has changed"
-   └─ If outdated: true → Flag even if code matches (GitHub marked it stale)
+   ├─ If outdated: true → Flag "GitHub marked stale"
+   └─ Does file at path:line contain originalCode?
+       ├─ Yes → Apply suggestionCode directly (replace lines)
+       └─ No → Flag "outdated suggestion — code has changed"
 
 2. Is it an interpretive comment?
    ├─ Read target file, understand intent
@@ -93,7 +93,7 @@ For each comment in JSON output:
 - Misunderstands the code's intent
 - Would introduce a bug
 - Ambiguous or contradictory
-- Lack context to be confident
+- Insufficient context to apply confidently
 - Outdated suggestion (code has changed)
 - Question or discussion (not actionable)
 
@@ -162,6 +162,8 @@ For each applied change, verify BEFORE resolving:
 ```bash
 ./scripts/verify-and-resolve.sh <owner> <repo> <thread_id> <comment_id> <file_path> "<search_pattern>" "<reply_message>"
 ```
+
+The `<search_pattern>` should be a unique substring from the applied change that confirms the fix is present (e.g., the new code that was added).
 
 Output verification results:
 ```
