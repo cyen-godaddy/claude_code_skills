@@ -33,7 +33,8 @@ Arguments:
     search_pattern  Literal string to verify fix exists (grep -F)
     reply_message   Message to post as reply
     --dry-run       Show what would happen without making changes
-    --skip-verify   Skip file verification (for outdated/already-fixed threads)
+    --skip-verify   Skip file verification (for outdated/already-fixed threads).
+                    Use '-' as placeholder for <file_path> and <search_pattern>.
 
 Exit codes:
     0   Success - thread resolved
@@ -185,7 +186,7 @@ thread_response=$(gh api graphql -f query="$thread_query" -f threadId="$THREAD_I
     thread_response=""
 }
 
-if [[ -n "$thread_response" ]] && echo "$thread_response" | jq -e ".data.node.comments.nodes[] | select(.body | contains(\"$MARKER\"))" > /dev/null 2>&1; then
+if [[ -n "$thread_response" ]] && echo "$thread_response" | jq -e --arg marker "$MARKER" '.data.node.comments.nodes[] | select(.body | contains($marker))' > /dev/null 2>&1; then
     log_warn "Reply already posted (found marker), skipping to resolve"
 else
     # Step 4: Post reply via GraphQL using addPullRequestReviewThreadReply

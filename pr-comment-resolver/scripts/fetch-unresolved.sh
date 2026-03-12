@@ -95,10 +95,14 @@ retry_api() {
             sleep "${RETRY_DELAYS[$attempt]}"
         fi
 
+        local stderr_tmp
+        stderr_tmp=$(mktemp)
         set +e
-        result=$("$@" 2>&1)
+        result=$("$@" 2>"$stderr_tmp")
         exit_code=$?
         set -e
+        local stderr_content
+        stderr_content=$(cat "$stderr_tmp"; rm -f "$stderr_tmp")
 
         if [[ $exit_code -eq 0 ]]; then
             # gh succeeded — validate response is JSON before proceeding
@@ -163,24 +167,24 @@ retry_api() {
         elif [[ $exit_code -eq 4 ]]; then
             # gh exit code 4 = HTTP 4xx client error
             # Check for rate limit (403 with rate limit message) vs auth (401) vs not found (404)
-            if echo "$result" | grep -qi "rate limit"; then
+            if echo "$stderr_content" | grep -qi "rate limit"; then
                 log_warn "Rate limited (attempt $((attempt + 1))/$MAX_RETRIES)"
                 last_failure_type="rate_limit"
                 attempt=$((attempt + 1))
                 continue
-            elif echo "$result" | grep -qi "401\|unauthorized\|Bad credentials"; then
+            elif echo "$stderr_content" | grep -qi "401\|unauthorized\|Bad credentials"; then
                 log_error "Authentication failed"
                 return 1
-            elif echo "$result" | grep -qi "404\|not found\|Could not resolve"; then
+            elif echo "$stderr_content" | grep -qi "404\|not found\|Could not resolve"; then
                 log_error "PR not found: $OWNER/$REPO#$PR_NUMBER"
                 return 2
             else
-                log_error "Client error: $result"
+                log_error "Client error: $stderr_content"
                 return 2
             fi
         else
             # Unknown exit code — not retryable
-            log_error "Unexpected error (exit $exit_code): $result"
+            log_error "Unexpected error (exit $exit_code): $stderr_content"
             return 2
         fi
     done
