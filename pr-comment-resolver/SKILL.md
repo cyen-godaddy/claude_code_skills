@@ -22,7 +22,7 @@ Analyze and apply GitHub PR review comments locally, flagging suggestions that d
 ## The Iron Law
 
 ```
-ANALYZE BEFORE APPLYING. FLAG WHAT DOESN'T MAKE SENSE.
+ANALYZE BEFORE APPLYING. FLAG WHAT DOESN'T MAKE SENSE. NEVER COMMIT CHANGES WITHOUT ASKING.
 ```
 
 ## Input Formats
