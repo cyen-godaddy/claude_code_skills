@@ -172,29 +172,19 @@ thread_response=$(gh api graphql -f query="$thread_query" -f threadId="$THREAD_I
 if [[ -n "$thread_response" ]] && echo "$thread_response" | jq -e ".data.node.comments.nodes[] | select(.body | contains(\"$MARKER\"))" > /dev/null 2>&1; then
     log_warn "Reply already posted (found marker), skipping to resolve"
 else
-    # Step 4: Post reply via GraphQL using addPullRequestReviewComment
-    # Get the first comment's node ID as the inReplyTo target
-    base_comment_id=""
-    if [[ -n "$thread_response" ]]; then
-        base_comment_id=$(echo "$thread_response" | jq -r '.data.node.comments.nodes[0].id // empty')
-    fi
-
-    if [[ -z "$base_comment_id" ]]; then
-        log_error "Could not determine base comment ID for thread $THREAD_ID"
-        exit 2
-    fi
-
+    # Step 4: Post reply via GraphQL using addPullRequestReviewThreadReply
+    # This mutation replies directly to a review thread by its node ID
     log_info "Posting reply to thread $THREAD_ID..."
     reply_mutation='
-mutation($inReplyTo: ID!, $body: String!) {
-  addPullRequestReviewComment(input: {inReplyTo: $inReplyTo, body: $body}) {
+mutation($threadId: ID!, $body: String!) {
+  addPullRequestReviewThreadReply(input: {pullRequestReviewThreadId: $threadId, body: $body}) {
     comment {
       id
     }
   }
 }'
 
-    reply_response=$(gh api graphql -f query="$reply_mutation" -f inReplyTo="$base_comment_id" -f body="$REPLY_MESSAGE" 2>&1) || {
+    reply_response=$(gh api graphql -f query="$reply_mutation" -f threadId="$THREAD_ID" -f body="$REPLY_MESSAGE" 2>&1) || {
         log_error "Failed to post reply: $reply_response"
         exit 2
     }
