@@ -4,7 +4,7 @@ description: Use when addressing GitHub PR review comments, resolving Copilot su
 license: Proprietary
 metadata:
   author: godaddy-platform
-  version: "2.0"
+  version: "2.1"
   category: developer-tools
 ---
 
@@ -55,11 +55,12 @@ Script handles:
 - Suggestion block parsing
 
 Output: JSON array of unresolved comments with fields:
-- `threadId`, `commentId`, `path`, `line`, `body`, `author`
+- `threadId`, `path`, `line`, `body`, `author` — core fields used by verify-and-resolve.sh
+- `commentId` — included for reference/logging but not required by verify-and-resolve.sh
 - `outdated` (boolean) — thread marked outdated by GitHub
 - `hasSuggestion` (boolean), `suggestionCode` (string|null)
 - `suggestionStartLine`, `suggestionEndLine` — line range for suggestions
-- `originalCode` — code context from diff hunk for outdated detection
+- `originalCode` — code context from diff hunk (RIGHT side for PR head, LEFT side for base)
 
 ### Phase 2: Analyze & Apply (LOCAL ONLY)
 
@@ -165,12 +166,20 @@ For each applied change, verify BEFORE resolving:
 ./scripts/verify-and-resolve.sh <owner> <repo> <thread_id> <file_path> "<search_pattern>" "<reply_message>"
 ```
 
-The `<search_pattern>` should be a **plain literal substring** from the applied change (no shell escaping of brackets, quotes, etc.). For example, if the fix added `allowed_methods=["GET"]`, pass exactly that string — `grep -F` matches literally.
+The `<search_pattern>` should be a **plain literal substring** from the applied change (`grep -F` matches literally). Choose patterns that are:
+- Unique enough to verify the fix (a comment or variable name from the change)
+- Free of shell special characters (`!`, `$`, `` ` ``, `\`) — these get mangled inside double quotes
+- **Good:** `"Auto-append marker if caller"`, `"comments(first: 100)"`, `"addPullRequestReviewThreadReply"`
+- **Bad:** `'REPLY_MESSAGE" != *"$MARKER"'` (the `!` and `$` corrupt the pattern)
+
+The `<reply_message>` does **not** need to include the idempotency marker — the script auto-appends `<!-- Applied by pr-comment-resolver -->` if missing.
 
 For outdated threads already fixed in prior commits, use `--skip-verify`:
 ```bash
 ./scripts/verify-and-resolve.sh <owner> <repo> <thread_id> - - "<reply_message>" --skip-verify
 ```
+
+**Parallel execution:** All verify-and-resolve calls can run in parallel for speed. However, if one call fails, the remaining parallel calls may be cancelled. Retry failed calls individually after the batch.
 
 Output verification results:
 ```
@@ -207,6 +216,16 @@ Verifying fixes in files...
 | Not on PR branch | Compare with PR head | Warn: "Not on PR branch — changes may not match" |
 | Empty PR | JSON output is `[]` | Exit: "No unresolved comments found" |
 | Deleted lines | Line number > file length | Skip: "Target line no longer exists" |
+
+## Known Pitfalls
+
+| Pitfall | Cause | Fix |
+|---------|-------|-----|
+| `FORBIDDEN` on reply posting | Using wrong GraphQL mutation | Script uses `addPullRequestReviewThreadReply` (not `addPullRequestReviewComment` which requires a pending review) |
+| Verification fails on valid fix | Shell special chars in search pattern (`!`, `$`, `` ` ``) | Choose plain alphanumeric substrings from the change |
+| Parallel resolve batch partially fails | One bad pattern cancels remaining calls | Retry failed calls individually after the batch completes |
+| Duplicate replies on retry | Caller omitted idempotency marker | Script auto-appends marker since v2.1; no action needed |
+| `originalCode` mismatch on RIGHT-side comments | Was extracting base side of diff | Fixed in v2.1 to extract PR head side (`+` lines) for RIGHT-side comments |
 
 ## Related Skills
 
