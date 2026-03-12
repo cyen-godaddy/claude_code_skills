@@ -9,9 +9,6 @@ set -euo pipefail
 # The originalCode comparison for outdated suggestion detection happens
 # in SKILL.md Phase 2 before this script is called.
 
-readonly MAX_RETRIES=3
-readonly RETRY_DELAYS=(0 2 5)
-
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
@@ -85,6 +82,11 @@ if ! gh auth status &> /dev/null; then
     exit 2
 fi
 
+if ! command -v jq &> /dev/null; then
+    log_error "jq not found. Install jq for JSON processing"
+    exit 2
+fi
+
 # Step 1: Check if file exists
 if [[ ! -f "$FILE_PATH" ]]; then
     log_error "File not found: $FILE_PATH"
@@ -129,6 +131,9 @@ if [[ "$DRY_RUN" == "true" ]]; then
     log_success "Dry run complete - no changes made"
     exit 0
 fi
+
+# NOTE: If reply posts but resolve fails, caller should handle partial state.
+# On retry, a duplicate reply may be posted. No idempotency guard on replies.
 
 # Step 4: Post reply to the comment
 log_info "Posting reply to comment $COMMENT_ID..."
