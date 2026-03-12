@@ -109,17 +109,26 @@ retry_api() {
                 continue
             fi
 
-            # Check for GraphQL-level errors
-            local gql_error
-            gql_error=$(echo "$result" | jq -r '.errors[0].type // empty' 2>/dev/null)
-
-            if [[ -z "$gql_error" ]]; then
-                # True success
+            # Check for GraphQL-level errors — some errors have .type, some only .message
+            if ! echo "$result" | jq -e '.errors and (.errors | length > 0)' > /dev/null 2>&1; then
+                # No errors array — true success
                 echo "$result"
                 return 0
             fi
 
-            # GraphQL error — classify by type
+            # GraphQL error present — classify by type (if available)
+            local gql_error
+            gql_error=$(echo "$result" | jq -r '.errors[0].type // empty' 2>/dev/null)
+
+            # If no type field, treat as non-retryable API error
+            if [[ -z "$gql_error" ]]; then
+                local msg
+                msg=$(echo "$result" | jq -r '.errors[0].message // "Unknown GraphQL error (no type)"')
+                log_error "GraphQL error: $msg"
+                return 2
+            fi
+
+            # Classify by type
             case "$gql_error" in
                 RATE_LIMITED)
                     log_warn "GraphQL rate limited (attempt $((attempt + 1))/$MAX_RETRIES)"
@@ -309,8 +318,8 @@ transform_threads() {
             path: .path,
             line: (.line // .startLine),
             startLine: .startLine,
-            suggestionStartLine: (.originalStartLine // .startLine),
-            suggestionEndLine: (.originalLine // .line // .startLine),
+            suggestionStartLine: (.startLine // .line // .originalStartLine // .originalLine),
+            suggestionEndLine: (.line // .startLine // .originalLine // .originalStartLine),
             side: .diffSide,
             body: .comments.nodes[0].body,
             author: .comments.nodes[0].author.login,

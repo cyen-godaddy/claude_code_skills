@@ -46,7 +46,7 @@ Fetches all unresolved PR comments with pagination, retries, and clean JSON outp
 - Pagination: Loop through all reviewThreads (not just first 50)
 - Retries: 3 attempts with stepped backoff (0s, 2s, 5s) for transient failures
 - Rate limiting: Detect rate limit via string match on response body, retry
-- All comments: Fetch all comments per thread for conversation context
+- Comment window: Fetch up to 100 comments per thread for conversation context (GraphQL `comments(first: 100)` limit)
 - Clean output: Structured JSON with normalized fields
 
 **Output format:**

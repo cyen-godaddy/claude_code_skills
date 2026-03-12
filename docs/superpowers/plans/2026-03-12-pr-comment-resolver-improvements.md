@@ -420,7 +420,7 @@ cat > pr-comment-resolver/scripts/verify-and-resolve.sh << 'SCRIPT'
 set -euo pipefail
 
 # verify-and-resolve.sh - Verify fix exists, reply, resolve thread
-# Usage: ./verify-and-resolve.sh <owner> <repo> <thread_id> <comment_id> <file_path> <search_pattern> <reply_message> [--dry-run]
+# Usage: ./verify-and-resolve.sh <owner> <repo> <thread_id> <file_path> <search_pattern> <reply_message> [--dry-run]
 # Exit codes: 0=resolved, 1=verification failed, 2=API error, 3=already resolved
 #
 # NOTE: This script verifies fixes using simple grep pattern matching.
@@ -794,7 +794,7 @@ git push
 
 For each applied change, verify BEFORE resolving:
 ```bash
-./scripts/verify-and-resolve.sh <owner> <repo> <thread_id> <comment_id> <file_path> "<search_pattern>" "<reply_message>"
+./scripts/verify-and-resolve.sh <owner> <repo> <thread_id> <file_path> "<search_pattern>" "<reply_message>"
 ```
 
 Output verification results:
@@ -813,7 +813,7 @@ Verifying fixes in files...
 |-----------|--------|---------|--------|
 | 0 | fetch-unresolved.sh | Success | Continue |
 | 1 | fetch-unresolved.sh | Auth error | Stop: "Run `gh auth login`" |
-| 2 | fetch-unresolved.sh | PR not found | Stop: "Check URL format" |
+| 2 | fetch-unresolved.sh | PR not found or API error | Stop: "Verify PR URL; if correct, retry (may be transient)" |
 | 3 | fetch-unresolved.sh | Rate limited | Stop: "GitHub rate limit, try in 15 min" |
 | 0 | verify-and-resolve.sh | Resolved | Report success |
 | 1 | verify-and-resolve.sh | Verification failed | Report "Fix not found — NOT resolved" |

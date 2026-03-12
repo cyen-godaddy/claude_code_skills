@@ -204,6 +204,13 @@ mutation($threadId: ID!, $body: String!) {
         log_error "Failed to post reply: $reply_response"
         exit 2
     }
+
+    # Check for GraphQL-level errors (gh can exit 0 with errors array)
+    if echo "$reply_response" | jq -e '.errors and (.errors | length > 0)' > /dev/null 2>&1; then
+        gql_msg=$(echo "$reply_response" | jq -r '.errors[0].message // "Unknown GraphQL error"')
+        log_error "Reply mutation failed: $gql_msg"
+        exit 2
+    fi
     log_success "Reply posted"
 fi
 
@@ -222,6 +229,13 @@ resolve_response=$(gh api graphql -f query="$resolve_mutation" -f threadId="$THR
     log_error "Failed to resolve thread: $resolve_response"
     exit 2
 }
+
+# Check for GraphQL-level errors before inspecting data payload
+if echo "$resolve_response" | jq -e '.errors and (.errors | length > 0)' > /dev/null 2>&1; then
+    gql_msg=$(echo "$resolve_response" | jq -r '.errors[0].message // "Unknown GraphQL error"')
+    log_error "Thread resolution failed: $gql_msg"
+    exit 2
+fi
 
 final_status=$(echo "$resolve_response" | jq -r '.data.resolveReviewThread.thread.isResolved // false')
 if [[ "$final_status" == "true" ]]; then
