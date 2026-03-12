@@ -94,14 +94,14 @@ retry_api() {
         # Check for rate limiting (429)
         if echo "$result" | grep -qi "rate limit\|API rate limit exceeded\|429"; then
             log_warn "Rate limited (attempt $((attempt + 1))/$MAX_RETRIES)"
-            ((attempt++))
+            attempt=$((attempt + 1))
             continue
         fi
 
         # Check for server errors (5xx)
         if echo "$result" | grep -qi "502\|503\|504\|500\|server error"; then
             log_warn "Server error (attempt $((attempt + 1))/$MAX_RETRIES)"
-            ((attempt++))
+            attempt=$((attempt + 1))
             continue
         fi
 
@@ -194,7 +194,7 @@ fetch_review_threads() {
         # Merge threads
         all_threads=$(echo "$all_threads" "$threads" | jq -s 'add')
 
-        log_info "Fetched $(echo "$threads" | jq 'length') threads (hasNext: $has_next)"
+        log_info "Fetched $(echo "$threads" | jq 'length') threads (hasNext: ${has_next})"
     done
 
     echo "$all_threads"
