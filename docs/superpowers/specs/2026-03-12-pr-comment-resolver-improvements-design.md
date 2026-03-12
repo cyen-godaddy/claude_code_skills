@@ -82,7 +82,7 @@ Verifies a fix exists in the file, then posts reply and resolves thread — only
 
 **Interface:**
 ```bash
-./verify-and-resolve.sh <owner> <repo> <thread_id> <comment_id> <file_path> <search_pattern> <reply_message> [--dry-run]
+./verify-and-resolve.sh <owner> <repo> <thread_id> <file_path> <search_pattern> <reply_message> [--dry-run]
 # Exit codes: 0=resolved, 1=verification failed, 2=API error, 3=already resolved
 ```
 
@@ -94,16 +94,14 @@ Verifies a fix exists in the file, then posts reply and resolves thread — only
 5. Confirm resolution → exit 0
 
 **Safety guards:**
-- `--dry-run` is the default when called from SKILL.md
+- Script runs in live mode by default; SKILL.md must explicitly pass `--dry-run` when a dry run is desired
 - Never resolves without verification passing
 - Logs all actions to stderr for audit trail
 - Fails closed (any uncertainty = don't resolve)
 
-**Retry strategy:**
-- Attempt 1: Immediate
-- Attempt 2: Wait 2 seconds
-- Attempt 3: Wait 5 seconds
-- Then fail with appropriate exit code
+**Retry strategy (current implementation):**
+- Single attempt per API call; failures are surfaced immediately with the appropriate exit code
+- Retries (e.g., 0/2/5s backoff) are a potential future enhancement and are not yet implemented
 
 ## Assets/Templates
 

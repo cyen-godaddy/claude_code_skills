@@ -162,14 +162,14 @@ git push
 
 For each applied change, verify BEFORE resolving:
 ```bash
-./scripts/verify-and-resolve.sh <owner> <repo> <thread_id> <comment_id> <file_path> "<search_pattern>" "<reply_message>"
+./scripts/verify-and-resolve.sh <owner> <repo> <thread_id> <file_path> "<search_pattern>" "<reply_message>"
 ```
 
 The `<search_pattern>` should be a **plain literal substring** from the applied change (no shell escaping of brackets, quotes, etc.). For example, if the fix added `allowed_methods=["GET"]`, pass exactly that string — `grep -F` matches literally.
 
 For outdated threads already fixed in prior commits, use `--skip-verify`:
 ```bash
-./scripts/verify-and-resolve.sh <owner> <repo> <thread_id> <comment_id> - - "<reply_message>" --skip-verify
+./scripts/verify-and-resolve.sh <owner> <repo> <thread_id> - - "<reply_message>" --skip-verify
 ```
 
 Output verification results:
@@ -189,7 +189,7 @@ Verifying fixes in files...
 |-----------|--------|---------|--------|
 | 0 | fetch-unresolved.sh | Success | Continue |
 | 1 | fetch-unresolved.sh | Auth error | Stop: "Run `gh auth login`" |
-| 2 | fetch-unresolved.sh | PR not found | Stop: "Check URL format" |
+| 2 | fetch-unresolved.sh | PR not found or API error | Stop: "Verify PR URL; if correct, retry (may be transient)" |
 | 3 | fetch-unresolved.sh | Rate limited | Stop: "GitHub rate limit, try in 15 min" |
 | 0 | verify-and-resolve.sh | Resolved | Report success |
 | 1 | verify-and-resolve.sh | Verification failed | Report "Fix not found — NOT resolved" |

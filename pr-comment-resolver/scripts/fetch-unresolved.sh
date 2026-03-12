@@ -3,7 +3,7 @@ set -euo pipefail
 
 # fetch-unresolved.sh - Fetch all unresolved PR comments with pagination
 # Usage: ./fetch-unresolved.sh <owner> <repo> <pr_number>
-# Exit codes: 0=success, 1=auth error, 2=not found, 3=rate limited
+# Exit codes: 0=success, 1=auth error, 2=not found/API error, 3=rate limited
 
 readonly MAX_RETRIES=3
 readonly RETRY_DELAYS=(0 2 5)
@@ -31,7 +31,7 @@ Arguments:
 Exit codes:
     0   Success - JSON output on stdout
     1   Authentication error - run 'gh auth login'
-    2   PR not found - check URL format
+    2   PR not found or API error - check URL; if correct, retry
     3   Rate limited - try again later
 
 Example:
@@ -101,7 +101,15 @@ retry_api() {
         set -e
 
         if [[ $exit_code -eq 0 ]]; then
-            # gh succeeded — check for GraphQL-level errors
+            # gh succeeded — validate response is JSON before proceeding
+            if ! echo "$result" | jq -e . > /dev/null 2>&1; then
+                log_warn "Non-JSON response from gh (attempt $((attempt + 1))/$MAX_RETRIES)"
+                last_failure_type="server_error"
+                attempt=$((attempt + 1))
+                continue
+            fi
+
+            # Check for GraphQL-level errors
             local gql_error
             gql_error=$(echo "$result" | jq -r '.errors[0].type // empty' 2>/dev/null)
 
@@ -279,13 +287,22 @@ transform_threads() {
                 {hasSuggestion: false, suggestionCode: null}
             end
         ) as $suggestion |
-        # Extract original code from diffHunk (lines starting with - or space after @@)
-        (.comments.nodes[0].diffHunk // "" |
-            split("\n") |
-            map(select(startswith(" ") or startswith("-"))) |
-            map(.[1:]) |
-            join("\n")
-        ) as $originalCode |
+        # Extract original code from diffHunk based on diff side
+        # RIGHT side (PR head): context lines (" ") + added lines ("+") = current file content
+        # LEFT side (base): context lines (" ") + removed lines ("-") = base file content
+        (if .diffSide == "LEFT" then
+            (.comments.nodes[0].diffHunk // "" |
+                split("\n") |
+                map(select(startswith(" ") or startswith("-"))) |
+                map(.[1:]) |
+                join("\n"))
+        else
+            (.comments.nodes[0].diffHunk // "" |
+                split("\n") |
+                map(select(startswith(" ") or startswith("+"))) |
+                map(.[1:]) |
+                join("\n"))
+        end) as $originalCode |
         {
             threadId: .id,
             commentId: .comments.nodes[0].databaseId,

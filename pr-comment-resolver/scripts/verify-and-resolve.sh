@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # verify-and-resolve.sh - Verify fix exists, reply, resolve thread
-# Usage: ./verify-and-resolve.sh <owner> <repo> <thread_id> <comment_id> <file_path> <search_pattern> <reply_message> [--dry-run]
+# Usage: ./verify-and-resolve.sh <owner> <repo> <thread_id> <file_path> <search_pattern> <reply_message> [--dry-run]
 # Exit codes: 0=resolved, 1=verification failed, 2=API error, 3=already resolved
 #
 # NOTE: This script verifies fixes using simple grep pattern matching.
@@ -21,7 +21,7 @@ log_info() { echo "$*" >&2; }
 
 usage() {
     cat >&2 << EOF
-Usage: $(basename "$0") <owner> <repo> <thread_id> <comment_id> <file_path> <search_pattern> <reply_message> [--dry-run] [--skip-verify]
+Usage: $(basename "$0") <owner> <repo> <thread_id> <file_path> <search_pattern> <reply_message> [--dry-run] [--skip-verify]
 
 Verify a fix exists in the file, then reply and resolve the thread.
 
@@ -29,7 +29,6 @@ Arguments:
     owner           Repository owner
     repo            Repository name
     thread_id       Review thread ID (PRT_xxx)
-    comment_id      Comment database ID
     file_path       Local path to the file
     search_pattern  Literal string to verify fix exists (grep -F)
     reply_message   Message to post as reply
@@ -43,8 +42,8 @@ Exit codes:
     3   Already resolved - no action needed
 
 Example:
-    $(basename "$0") octocat hello-world PRT_xxx 12345 src/file.js "null check" "Fixed null check" --dry-run
-    $(basename "$0") octocat hello-world PRT_xxx 12345 - - "Already fixed" --skip-verify
+    $(basename "$0") octocat hello-world PRT_xxx src/file.js "null check" "Fixed null check" --dry-run
+    $(basename "$0") octocat hello-world PRT_xxx - - "Already fixed" --skip-verify
 EOF
     exit 1
 }
@@ -64,17 +63,16 @@ for arg in "$@"; do
     fi
 done
 
-if [[ ${#ARGS[@]} -ne 7 ]]; then
+if [[ ${#ARGS[@]} -ne 6 ]]; then
     usage
 fi
 
 OWNER="${ARGS[0]}"
 REPO="${ARGS[1]}"
 THREAD_ID="${ARGS[2]}"
-COMMENT_ID="${ARGS[3]}"
-FILE_PATH="${ARGS[4]}"
-SEARCH_PATTERN="${ARGS[5]}"
-REPLY_MESSAGE="${ARGS[6]}"
+FILE_PATH="${ARGS[3]}"
+SEARCH_PATTERN="${ARGS[4]}"
+REPLY_MESSAGE="${ARGS[5]}"
 
 # Validate prerequisites
 if ! command -v gh &> /dev/null; then
@@ -107,6 +105,17 @@ status_response=$(gh api graphql -f query="$check_query" -f id="$THREAD_ID" 2>&1
     log_error "Failed to check thread status: $status_response"
     exit 2
 }
+
+# Check for GraphQL errors or null node (e.g., invalid thread ID)
+if echo "$status_response" | jq -e '.errors' > /dev/null 2>&1; then
+    gql_msg=$(echo "$status_response" | jq -r '.errors[0].message // "Unknown GraphQL error"')
+    log_error "GraphQL error checking thread status: $gql_msg"
+    exit 2
+fi
+if echo "$status_response" | jq -e '.data.node == null' > /dev/null 2>&1; then
+    log_error "Thread not found: $THREAD_ID"
+    exit 2
+fi
 
 is_resolved=$(echo "$status_response" | jq -r '.data.node.isResolved // false')
 if [[ "$is_resolved" == "true" ]]; then
@@ -149,6 +158,13 @@ fi
 # This prevents duplicate replies on retry when reply posted but resolve failed
 log_info "Checking for existing reply..."
 MARKER="<!-- Applied by pr-comment-resolver -->"
+
+# Auto-append marker if caller didn't include it, ensuring idempotency
+if [[ "$REPLY_MESSAGE" != *"$MARKER"* ]]; then
+    REPLY_MESSAGE="${REPLY_MESSAGE}
+
+${MARKER}"
+fi
 
 thread_query='
 query($threadId: ID!) {
