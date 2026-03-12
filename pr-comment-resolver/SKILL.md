@@ -4,7 +4,7 @@ description: Use when addressing GitHub PR review comments, resolving Copilot su
 license: Proprietary
 metadata:
   author: godaddy-platform
-  version: "1.1"
+  version: "2.0"
   category: developer-tools
 ---
 
@@ -22,8 +22,15 @@ Analyze and apply GitHub PR review comments locally, flagging suggestions that d
 ## The Iron Law
 
 ```
-ANALYZE BEFORE APPLYING. FLAG WHAT DOESN'T MAKE SENSE. NEVER COMMIT CHANGES WITHOUT ASKING.
+ANALYZE BEFORE APPLYING. FLAG WHAT DOESN'T MAKE SENSE. NEVER COMMIT OR RESOLVE WITHOUT USER PERMISSION.
 ```
+
+## Prerequisites
+
+- `gh` CLI installed and authenticated (`gh auth status`)
+- `jq` installed for JSON processing
+- Local clone of the repository
+- Ideally on the PR branch (`gh pr checkout NUMBER`)
 
 ## Input Formats
 
@@ -37,136 +44,159 @@ Accept PR URLs in any format:
 ### Phase 1: Fetch Unresolved Comments
 
 ```bash
-# Extract owner/repo/number from URL, then:
-
-# Get thread resolution status
-gh api graphql -f query='
-{
-  repository(owner: "OWNER", name: "REPO") {
-    pullRequest(number: NUMBER) {
-      reviewThreads(first: 50) {
-        nodes {
-          id
-          isResolved
-          comments(first: 1) {
-            nodes {
-              databaseId
-              body
-              path
-              line
-            }
-          }
-        }
-      }
-    }
-  }
-}' --jq '.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved == false)'
+# Extract owner/repo/number from URL, then run:
+./scripts/fetch-unresolved.sh <owner> <repo> <pr_number>
 ```
 
-Group unresolved comments by file path.
+Script handles:
+- Pagination (fetches all threads, not just first 50)
+- Retries with exponential backoff for transient failures
+- Rate limit detection and waiting
+- Suggestion block parsing
 
-### Phase 2: Analyze & Apply
+Output: JSON array of unresolved comments with fields:
+- `threadId`, `commentId`, `path`, `line`, `body`, `author`
+- `outdated` (boolean) — thread marked outdated by GitHub
+- `hasSuggestion` (boolean), `suggestionCode` (string|null)
+- `suggestionStartLine`, `suggestionEndLine` — line range for suggestions
+- `originalCode` — code context from diff hunk for outdated detection
 
-For each unresolved comment:
+### Phase 2: Analyze & Apply (LOCAL ONLY)
 
-1. **Read** the target file at the specified line
-2. **Understand** what the comment is asking for
-3. **Decide:**
-   - Suggestion makes sense → Apply the fix using Edit tool
-   - Suggestion unclear/wrong → Flag it, skip, continue
-4. **Track** applied changes and skipped comments with reasons
+For each comment in JSON output:
+
+**Decision Tree:**
+
+```
+1. Is it a suggestion block? (hasSuggestion: true)
+   ├─ Check: Does file at path:line contain originalCode?
+   │   ├─ Yes → Apply suggestionCode directly (replace lines)
+   │   └─ No → Flag "outdated suggestion — code has changed"
+   └─ If outdated: true → Flag even if code matches (GitHub marked it stale)
+
+2. Is it an interpretive comment?
+   ├─ Read target file, understand intent
+   ├─ Makes sense? → Edit file using Edit tool, track change
+   └─ Unclear/wrong? → Flag with reason
+
+3. Is it a question/discussion?
+   └─ Skip — not actionable
+```
 
 **Apply when:**
 - Corrects an actual bug or inconsistency
 - Aligns with project conventions
 - Localized fix that won't break other code
+- Suggestion block with matching target code
 
 **Flag and skip when:**
 - Misunderstands the code's intent
 - Would introduce a bug
 - Ambiguous or contradictory
 - Lack context to be confident
+- Outdated suggestion (code has changed)
+- Question or discussion (not actionable)
 
-### Phase 3: Report & Offer Next Steps
+### Phase 3: Report Results
 
 Output during processing:
 ```
-✓ file.js:55 — Added null check before access
-⊘ config.ts:42 — SKIPPED: Conflicts with existing error handling pattern
+✓ file.js:55 — [suggestion] Applied null coalescing operator
+✓ config.ts:42 — [interpreted] Added error handling
+⊘ api.ts:18 — SKIPPED: Question, not actionable
+⊘ utils.js:30 — SKIPPED: Outdated suggestion — code has changed
 ```
 
 Summary report:
 ```
 ## PR Comment Resolution Summary
 
-**Applied:** 4 changes
-**Skipped:** 2 comments
+**Applied (suggestion):** N changes
+**Applied (interpreted):** M changes
+**Skipped:** K comments
 
 ### Applied Changes
-- `collect.sh:55` — Added empty NS check with error exit
-- `collect.sh:73` — Guarded NS2 with conditional
+- `file.js:55` — [suggestion] Replaced || with ??
+- `config.ts:42` — [interpreted] Added null check before access
 
 ### Skipped (Needs Review)
-- `config.js:42` — Suggestion conflicts with existing error handling pattern
-- `api.ts:18` — Ambiguous: unclear which validation to add
+- `api.ts:18` — Question, not actionable
+- `utils.js:30` — Outdated suggestion — code has changed
 
 ### Next Steps
 Would you like me to commit, push, and resolve the applied comments?
 ```
 
-### Phase 4: Verify Before Resolving
+### Phase 4: User Permission Gate
 
 <HARD-GATE>
-NEVER resolve a comment without verifying the fix is in the file. A resolved comment with no actual change is worse than an unresolved one.
+ASK: "Commit, push, and resolve N comments? [y/N]"
+STOP and wait for explicit "yes" before proceeding.
+NEVER commit changes or resolve threads without user permission.
 </HARD-GATE>
 
-After committing and pushing, verify EVERY applied fix before resolving its comment:
+### Phase 5: Verify, Commit, Push, Resolve
 
-1. For each applied change, grep or read the file to confirm the fix is present
-2. Output verification results:
+Only after user confirms:
+
+**Step 1: Commit changes**
+```bash
+# Use template from assets/commit-message.tpl
+git add -A && git commit -m "fix: address PR review comments
+
+Applied N changes from PR #123:
+- file.js:55 — [suggestion] Replaced || with ??
+- config.ts:42 — [interpreted] Added null check
+
+Skipped M comments (see PR for details)"
+```
+
+**Step 2: Push**
+```bash
+git push
+```
+
+**Step 3: Verify and resolve each applied fix**
+
+For each applied change, verify BEFORE resolving:
+```bash
+./scripts/verify-and-resolve.sh <owner> <repo> <thread_id> <comment_id> <file_path> "<search_pattern>" "<reply_message>"
+```
+
+Output verification results:
 ```
 Verifying fixes in files...
-✓ collect.sh:53 — VERIFIED: "Unable to determine authoritative nameserver" found
-✓ collect.sh:79 — VERIFIED: 'if [ -n "${NS2:-}" ]' found
-✗ README.md:18 — NOT FOUND: description unchanged
+✓ file.js:55 — VERIFIED: Pattern found, thread resolved
+✓ config.ts:42 — VERIFIED: Pattern found, thread resolved
+✗ api.ts:30 — NOT FOUND: Fix not in file, thread NOT resolved
 ```
-3. Only resolve comments whose fixes are verified
-4. For any fix that fails verification, report it and DO NOT resolve the comment
 
-If user approves next steps:
-
-```bash
-# Commit changes
-git add -A && git commit -m "fix: address PR review comments"
-
-# Push
-git push
-
-# VERIFY each fix before resolving
-# For each applied comment, grep/read the file to confirm the change exists.
-# Only then reply and resolve:
-gh api repos/OWNER/REPO/pulls/NUMBER/comments/COMMENT_ID/replies \
-  -f body="Fixed — DESCRIPTION"
-
-gh api graphql -f query='mutation { resolveReviewThread(input: {threadId: "THREAD_ID"}) { thread { isResolved } } }'
-```
+**CRITICAL:** Only resolve comments whose fixes are verified present in the pushed code.
 
 ## Error Handling
 
-| Error | Action |
-|-------|--------|
-| PR not found | Exit: "PR not found. Check the URL format: owner/repo#number" |
-| No unresolved comments | Exit: "No unresolved comments found on this PR" |
-| File not in local repo | Skip: "File not found locally — comment may be on deleted file" |
-| `gh` CLI missing | Exit: "Install gh CLI: https://cli.github.com" |
-| Auth failure | Exit: "Run `gh auth login` to authenticate" |
-| Not on PR branch | Warn: "You may not be on the PR branch — changes might not match" |
+| Exit Code | Script | Meaning | Action |
+|-----------|--------|---------|--------|
+| 0 | fetch-unresolved.sh | Success | Continue |
+| 1 | fetch-unresolved.sh | Auth error | Stop: "Run `gh auth login`" |
+| 2 | fetch-unresolved.sh | PR not found | Stop: "Check URL format" |
+| 3 | fetch-unresolved.sh | Rate limited | Stop: "GitHub rate limit, try in 15 min" |
+| 0 | verify-and-resolve.sh | Resolved | Report success |
+| 1 | verify-and-resolve.sh | Verification failed | Report "Fix not found — NOT resolved" |
+| 2 | verify-and-resolve.sh | API error | Report "Failed to resolve — manual action needed" |
+| 3 | verify-and-resolve.sh | Already resolved | Skip silently |
 
-## Prerequisites
+## Edge Cases
 
-- `gh` CLI installed and authenticated (`gh auth status`)
-- Local clone of the repository
-- Ideally on the PR branch (`gh pr checkout NUMBER`)
+| Edge Case | Detection | Handling |
+|-----------|-----------|----------|
+| Comment on deleted file | `path` not in local repo | Skip: "File deleted — cannot apply" |
+| Outdated suggestion | `originalCode` not in file at line | Skip: "Code changed since suggestion" |
+| Binary file | File extension check | Skip: "Binary file — manual review needed" |
+| Merge conflict markers | `<<<<<<<` in target file | Stop: "Resolve merge conflicts first" |
+| Not on PR branch | Compare with PR head | Warn: "Not on PR branch — changes may not match" |
+| Empty PR | JSON output is `[]` | Exit: "No unresolved comments found" |
+| Deleted lines | Line number > file length | Skip: "Target line no longer exists" |
 
 ## Related Skills
 
