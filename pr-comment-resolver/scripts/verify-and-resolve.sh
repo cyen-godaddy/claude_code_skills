@@ -92,25 +92,7 @@ if ! command -v jq &> /dev/null; then
     exit 2
 fi
 
-# Step 1 & 2: Verify fix exists in file (unless --skip-verify)
-if [[ "$SKIP_VERIFY" == "true" ]]; then
-    log_info "Skipping file verification (--skip-verify)"
-else
-    if [[ ! -f "$FILE_PATH" ]]; then
-        log_error "File not found: $FILE_PATH"
-        exit 1
-    fi
-
-    log_info "Verifying fix in $FILE_PATH..."
-    if grep -qF "$SEARCH_PATTERN" "$FILE_PATH"; then
-        log_success "VERIFIED: Pattern found in file"
-    else
-        log_error "VERIFICATION FAILED: Pattern '$SEARCH_PATTERN' not found in $FILE_PATH"
-        exit 1
-    fi
-fi
-
-# Step 3: Check if thread is already resolved
+# Step 1: Check if thread is already resolved (before any local verification)
 log_info "Checking thread status..."
 check_query='
 query($id: ID!) {
@@ -132,6 +114,29 @@ if [[ "$is_resolved" == "true" ]]; then
     exit 3
 fi
 
+# Step 2: Verify fix exists in file (unless --skip-verify)
+if [[ "$SKIP_VERIFY" == "true" ]]; then
+    log_info "Skipping file verification (--skip-verify)"
+else
+    if [[ ! -f "$FILE_PATH" ]]; then
+        log_error "File not found: $FILE_PATH"
+        exit 1
+    fi
+
+    if [[ -z "${SEARCH_PATTERN// /}" ]]; then
+        log_error "Search pattern is empty or whitespace-only"
+        exit 1
+    fi
+
+    log_info "Verifying fix in $FILE_PATH..."
+    if grep -qF "$SEARCH_PATTERN" "$FILE_PATH"; then
+        log_success "VERIFIED: Pattern found in file"
+    else
+        log_error "VERIFICATION FAILED: Pattern '$SEARCH_PATTERN' not found in $FILE_PATH"
+        exit 1
+    fi
+fi
+
 # Dry run stops here
 if [[ "$DRY_RUN" == "true" ]]; then
     log_info "[DRY-RUN] Would post reply: $REPLY_MESSAGE"
@@ -144,18 +149,52 @@ fi
 # This prevents duplicate replies on retry when reply posted but resolve failed
 log_info "Checking for existing reply..."
 MARKER="<!-- Applied by pr-comment-resolver -->"
-existing_replies=$(gh api "repos/$OWNER/$REPO/pulls/comments/$COMMENT_ID/replies" --paginate 2>&1) || {
-    log_warn "Could not fetch existing replies, proceeding with post"
-    existing_replies="[]"
+
+thread_query='
+query($threadId: ID!) {
+  node(id: $threadId) {
+    ... on PullRequestReviewThread {
+      comments(first: 100) {
+        nodes {
+          id
+          body
+        }
+      }
+    }
+  }
+}'
+
+thread_response=$(gh api graphql -f query="$thread_query" -f threadId="$THREAD_ID" 2>&1) || {
+    log_warn "Could not fetch existing thread comments, proceeding with post"
+    thread_response=""
 }
 
-if echo "$existing_replies" | jq -e ".[] | select(.body | contains(\"$MARKER\"))" > /dev/null 2>&1; then
+if [[ -n "$thread_response" ]] && echo "$thread_response" | jq -e ".data.node.comments.nodes[] | select(.body | contains(\"$MARKER\"))" > /dev/null 2>&1; then
     log_warn "Reply already posted (found marker), skipping to resolve"
 else
-    # Step 4: Post reply to the comment
-    log_info "Posting reply to comment $COMMENT_ID..."
-    reply_response=$(gh api "repos/$OWNER/$REPO/pulls/comments/$COMMENT_ID/replies" \
-        -f body="$REPLY_MESSAGE" 2>&1) || {
+    # Step 4: Post reply via GraphQL using addPullRequestReviewComment
+    # Get the first comment's node ID as the inReplyTo target
+    base_comment_id=""
+    if [[ -n "$thread_response" ]]; then
+        base_comment_id=$(echo "$thread_response" | jq -r '.data.node.comments.nodes[0].id // empty')
+    fi
+
+    if [[ -z "$base_comment_id" ]]; then
+        log_error "Could not determine base comment ID for thread $THREAD_ID"
+        exit 2
+    fi
+
+    log_info "Posting reply to thread $THREAD_ID..."
+    reply_mutation='
+mutation($inReplyTo: ID!, $body: String!) {
+  addPullRequestReviewComment(input: {inReplyTo: $inReplyTo, body: $body}) {
+    comment {
+      id
+    }
+  }
+}'
+
+    reply_response=$(gh api graphql -f query="$reply_mutation" -f inReplyTo="$base_comment_id" -f body="$REPLY_MESSAGE" 2>&1) || {
         log_error "Failed to post reply: $reply_response"
         exit 2
     }

@@ -87,6 +87,7 @@ retry_api() {
     local attempt=0
     local result
     local exit_code
+    local last_failure_type="unknown"  # Track for accurate exit code on exhaustion
 
     while [[ $attempt -lt $MAX_RETRIES ]]; do
         if [[ ${RETRY_DELAYS[$attempt]} -gt 0 ]]; then
@@ -114,6 +115,7 @@ retry_api() {
             case "$gql_error" in
                 RATE_LIMITED)
                     log_warn "GraphQL rate limited (attempt $((attempt + 1))/$MAX_RETRIES)"
+                    last_failure_type="rate_limit"
                     attempt=$((attempt + 1))
                     continue
                     ;;
@@ -138,6 +140,7 @@ retry_api() {
         if [[ $exit_code -eq 1 ]]; then
             # Network or server error — retryable
             log_warn "Server/network error (attempt $((attempt + 1))/$MAX_RETRIES)"
+            last_failure_type="server_error"
             attempt=$((attempt + 1))
             continue
         elif [[ $exit_code -eq 4 ]]; then
@@ -145,6 +148,7 @@ retry_api() {
             # Check for rate limit (403 with rate limit message) vs auth (401) vs not found (404)
             if echo "$result" | grep -qi "rate limit"; then
                 log_warn "Rate limited (attempt $((attempt + 1))/$MAX_RETRIES)"
+                last_failure_type="rate_limit"
                 attempt=$((attempt + 1))
                 continue
             elif echo "$result" | grep -qi "401\|unauthorized\|Bad credentials"; then
@@ -164,8 +168,13 @@ retry_api() {
         fi
     done
 
-    log_error "Exhausted $MAX_RETRIES retries"
-    return 3
+    if [[ "$last_failure_type" == "rate_limit" ]]; then
+        log_error "Rate limited after $MAX_RETRIES retries"
+        return 3
+    else
+        log_error "Server/network error after $MAX_RETRIES retries"
+        return 2
+    fi
 }
 
 # Fetch review threads with pagination
@@ -196,7 +205,7 @@ fetch_review_threads() {
                   originalLine
                   originalStartLine
                   diffSide
-                  comments(first: 10) {
+                  comments(first: 100) {
                     nodes {
                       databaseId
                       body
