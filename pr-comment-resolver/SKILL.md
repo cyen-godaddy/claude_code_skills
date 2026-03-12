@@ -30,7 +30,7 @@ ANALYZE BEFORE APPLYING. FLAG WHAT DOESN'T MAKE SENSE. NEVER COMMIT OR RESOLVE W
 - `gh` CLI installed and authenticated (`gh auth status`)
 - `jq` installed for JSON processing
 - Local clone of the repository
-- Ideally on the PR branch (`gh pr checkout NUMBER`)
+- On the PR branch — Phase 0 verifies this and auto-switches if needed
 
 ## Input Formats
 
@@ -41,6 +41,24 @@ Accept PR URLs in any format:
 
 ## Execution
 
+### Phase 0: Verify Branch
+
+Before doing anything else, confirm the working directory is on the PR's head branch.
+
+```bash
+# Get the PR's head branch name
+pr_branch=$(gh pr view <pr_number> --repo <owner>/<repo> --json headRefName --jq '.headRefName')
+
+# Get the current local branch
+current_branch=$(git branch --show-current)
+```
+
+**Decision:**
+- `current_branch == pr_branch` → Proceed to Phase 1
+- `current_branch != pr_branch` → Switch automatically with `gh pr checkout <pr_number>`, then confirm the switch succeeded before continuing. If the checkout fails (e.g., uncommitted changes), ask the user to resolve it.
+
+**NEVER skip this check.** Applying fixes on the wrong branch means the push will go to the wrong place and verify-and-resolve.sh will resolve threads against code that isn't in the PR.
+
 ### Phase 1: Fetch Unresolved Comments
 
 ```bash
@@ -50,17 +68,20 @@ Accept PR URLs in any format:
 
 Script handles:
 - Pagination (fetches all threads, not just first 50)
-- Retries with exponential backoff for transient failures
-- Rate limit detection and waiting
+- Retries with stepped backoff (0s, 2s, 5s) for transient failures
+- Rate limit detection (string match on response) and retry
 - Suggestion block parsing
 
 Output: JSON array of unresolved comments with fields:
 - `threadId`, `path`, `line`, `body`, `author` — core fields used by verify-and-resolve.sh
 - `commentId` — included for reference/logging but not required by verify-and-resolve.sh
+- `startLine` — start of the comment's line range (null if single-line)
+- `side` — diff side: `"RIGHT"` (PR head) or `"LEFT"` (base)
 - `outdated` (boolean) — thread marked outdated by GitHub
 - `hasSuggestion` (boolean), `suggestionCode` (string|null)
 - `suggestionStartLine`, `suggestionEndLine` — line range for suggestions
 - `originalCode` — code context from diff hunk (RIGHT side for PR head, LEFT side for base)
+- `replies` — array of reply comment bodies (for conversation context)
 
 ### Phase 2: Analyze & Apply (LOCAL ONLY)
 
@@ -142,6 +163,8 @@ NEVER commit changes or resolve threads without user permission.
 Only after user confirms:
 
 **Step 1: Commit changes**
+
+Use the format from `assets/commit-message.tpl`:
 ```bash
 # Stage ONLY the files that were edited during Phase 2 (avoid git add -A)
 # Use the tracked list of applied changes to stage specific files
@@ -172,9 +195,9 @@ The `<search_pattern>` should be a **plain literal substring** from the applied 
 - **Good:** `"Auto-append marker if caller"`, `"comments(first: 100)"`, `"addPullRequestReviewThreadReply"`
 - **Bad:** `'REPLY_MESSAGE" != *"$MARKER"'` (the `!` and `$` corrupt the pattern)
 
-The `<reply_message>` does **not** need to include the idempotency marker — the script auto-appends `<!-- Applied by pr-comment-resolver -->` if missing.
+The `<reply_message>` should follow the format in `assets/reply.tpl`: `"Fixed — <description>"`. The idempotency marker (`<!-- Applied by pr-comment-resolver -->`) is auto-appended by the script if missing — callers do not need to include it.
 
-For outdated threads already fixed in prior commits, use `--skip-verify`:
+For outdated threads already fixed in prior commits, use `--skip-verify`. Pass `-` as a placeholder for `<file_path>` and `<search_pattern>` (these args are ignored when `--skip-verify` is set, but must be present for positional parsing):
 ```bash
 ./scripts/verify-and-resolve.sh <owner> <repo> <thread_id> - - "<reply_message>" --skip-verify
 ```
@@ -213,7 +236,7 @@ Verifying fixes in files...
 | Outdated suggestion | `originalCode` not in file at line | Skip: "Code changed since suggestion" |
 | Binary file | File extension check | Skip: "Binary file — manual review needed" |
 | Merge conflict markers | `<<<<<<<` in target file | Stop: "Resolve merge conflicts first" |
-| Not on PR branch | Compare with PR head | Warn: "Not on PR branch — changes may not match" |
+| Not on PR branch | Phase 0 branch check | Auto-switch via `gh pr checkout`; if fails, stop and ask user |
 | Empty PR | JSON output is `[]` | Exit: "No unresolved comments found" |
 | Deleted lines | Line number > file length | Skip: "Target line no longer exists" |
 

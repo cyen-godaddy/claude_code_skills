@@ -39,13 +39,13 @@ Fetches all unresolved PR comments with pagination, retries, and clean JSON outp
 ```bash
 ./fetch-unresolved.sh <owner> <repo> <pr_number>
 # Outputs JSON to stdout, errors to stderr
-# Exit codes: 0=success, 1=auth error, 2=not found, 3=rate limited
+# Exit codes: 0=success, 1=auth error, 2=not found/API error, 3=rate limited
 ```
 
 **Robustness features:**
 - Pagination: Loop through all reviewThreads (not just first 50)
-- Retries: 3 attempts with exponential backoff for transient failures
-- Rate limiting: Detect 403/rate limit responses, wait and retry
+- Retries: 3 attempts with stepped backoff (0s, 2s, 5s) for transient failures
+- Rate limiting: Detect rate limit via string match on response body, retry
 - All comments: Fetch all comments per thread for conversation context
 - Clean output: Structured JSON with normalized fields
 
@@ -57,6 +57,7 @@ Fetches all unresolved PR comments with pagination, retries, and clean JSON outp
     "commentId": 12345,
     "path": "src/foo.js",
     "line": 42,
+    "startLine": 40,
     "side": "RIGHT",
     "body": "Consider adding null check",
     "author": "reviewer-name",
@@ -82,7 +83,7 @@ Verifies a fix exists in the file, then posts reply and resolves thread — only
 
 **Interface:**
 ```bash
-./verify-and-resolve.sh <owner> <repo> <thread_id> <file_path> <search_pattern> <reply_message> [--dry-run]
+./verify-and-resolve.sh <owner> <repo> <thread_id> <file_path> <search_pattern> <reply_message> [--dry-run] [--skip-verify]
 # Exit codes: 0=resolved, 1=verification failed, 2=API error, 3=already resolved
 ```
 
@@ -162,6 +163,13 @@ const result = value ?? defaultValue;
 
 ## Updated SKILL.md Structure
 
+### Phase 0: Verify Branch
+Before any work, confirm the local branch matches the PR's head branch:
+- Get PR head branch via `gh pr view <number> --json headRefName`
+- Compare with `git branch --show-current`
+- If mismatched, auto-switch via `gh pr checkout <number>`
+- If checkout fails (dirty working tree), stop and ask user
+
 ### Phase 1: Fetch Comments
 Run `./scripts/fetch-unresolved.sh <owner> <repo> <pr>`
 - Script handles pagination, retries, rate limits
@@ -220,12 +228,13 @@ Never commit or resolve without user permission.
 </HARD-GATE>
 ```
 
-### Phase 5: Commit, Push, Resolve
+### Phase 5: Verify, Commit, Push, Resolve
 Only after user confirms:
 1. Stage and commit using assets/commit-message.tpl
 2. Push to remote
 3. For each applied fix:
    - Run verify-and-resolve.sh (without --dry-run)
+   - For outdated threads already fixed, use `--skip-verify`
    - Report success/failure per thread
 
 ## Error Handling
@@ -236,7 +245,7 @@ Only after user confirms:
 |--------|------|---------|--------|
 | fetch-unresolved.sh | 0 | Success | Continue |
 | | 1 | Auth error | Stop: "Run `gh auth login`" |
-| | 2 | PR not found | Stop: "Check URL format" |
+| | 2 | PR not found or API error | Stop: "Verify PR URL; if correct, retry (may be transient)" |
 | | 3 | Rate limited after retries | Stop: "GitHub rate limit, try in 15 min" |
 | verify-and-resolve.sh | 0 | Resolved | Report success |
 | | 1 | Verification failed | Report "Fix not found in file — NOT resolved" |
@@ -251,7 +260,7 @@ Only after user confirms:
 | Outdated suggestion | Original code doesn't match | Skip: "Code changed since suggestion" |
 | Binary file | File extension or content check | Skip: "Binary file — manual review needed" |
 | Merge conflict markers | `<<<<<<<` in target file | Stop Phase 2: "Resolve merge conflicts first" |
-| Not on PR branch | Compare `git branch` with PR head | Warn: "Not on PR branch — changes may not match" |
+| Not on PR branch | Phase 0 branch check | Auto-switch via `gh pr checkout`; if fails, stop and ask user |
 | Empty PR (no comments) | JSON output is `[]` | Exit: "No unresolved comments found" |
 | Comment spans deleted lines | Line number > file length | Skip: "Target line no longer exists" |
 
