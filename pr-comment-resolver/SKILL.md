@@ -4,7 +4,7 @@ description: Use when addressing GitHub PR review comments, resolving Copilot su
 license: Proprietary
 metadata:
   author: godaddy-platform
-  version: "1.1"
+  version: "2.1"
   category: developer-tools
 ---
 
@@ -22,8 +22,15 @@ Analyze and apply GitHub PR review comments locally, flagging suggestions that d
 ## The Iron Law
 
 ```
-ANALYZE BEFORE APPLYING. FLAG WHAT DOESN'T MAKE SENSE. NEVER COMMIT CHANGES WITHOUT ASKING.
+ANALYZE BEFORE APPLYING. FLAG WHAT DOESN'T MAKE SENSE. NEVER COMMIT OR RESOLVE WITHOUT USER PERMISSION.
 ```
+
+## Prerequisites
+
+- `gh` CLI installed and authenticated (`gh auth status`)
+- `jq` installed for JSON processing
+- Local clone of the repository
+- On the PR branch — Phase 0 verifies this and auto-switches if needed
 
 ## Input Formats
 
@@ -34,139 +41,214 @@ Accept PR URLs in any format:
 
 ## Execution
 
+### Phase 0: Verify Branch
+
+Before doing anything else, confirm the working directory is on the PR's head branch.
+
+```bash
+# Get the PR's head branch name
+pr_branch=$(gh pr view <pr_number> --repo <owner>/<repo> --json headRefName --jq '.headRefName')
+
+# Get the current local branch
+current_branch=$(git branch --show-current)
+```
+
+**Decision:**
+- `current_branch == pr_branch` → Proceed to Phase 1
+- `current_branch != pr_branch` → Switch automatically with `gh pr checkout <pr_number>`, then confirm the switch succeeded before continuing. If the checkout fails (e.g., uncommitted changes), ask the user to resolve it.
+
+**NEVER skip this check.** Applying fixes on the wrong branch means the push will go to the wrong place and verify-and-resolve.sh will resolve threads against code that isn't in the PR.
+
 ### Phase 1: Fetch Unresolved Comments
 
 ```bash
-# Extract owner/repo/number from URL, then:
-
-# Get thread resolution status
-gh api graphql -f query='
-{
-  repository(owner: "OWNER", name: "REPO") {
-    pullRequest(number: NUMBER) {
-      reviewThreads(first: 50) {
-        nodes {
-          id
-          isResolved
-          comments(first: 1) {
-            nodes {
-              databaseId
-              body
-              path
-              line
-            }
-          }
-        }
-      }
-    }
-  }
-}' --jq '.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved == false)'
+# Extract owner/repo/number from URL, then run:
+./scripts/fetch-unresolved.sh <owner> <repo> <pr_number>
 ```
 
-Group unresolved comments by file path.
+Script handles:
+- Pagination (fetches all threads, not just first 50)
+- Retries with stepped backoff (0s, 2s, 5s) for transient failures
+- Rate limit detection (string match on response) and retry
+- Suggestion block parsing
 
-### Phase 2: Analyze & Apply
+Output: JSON array of unresolved comments with fields:
+- `threadId`, `path`, `line`, `body`, `author` — core fields used by verify-and-resolve.sh
+- `commentId` — included for reference/logging but not required by verify-and-resolve.sh
+- `startLine` — start of the comment's line range (null if single-line)
+- `side` — diff side: `"RIGHT"` (PR head) or `"LEFT"` (base)
+- `outdated` (boolean) — thread marked outdated by GitHub
+- `hasSuggestion` (boolean), `suggestionCode` (string|null)
+- `suggestionStartLine`, `suggestionEndLine` — line range for suggestions
+- `originalCode` — code context from diff hunk (RIGHT side for PR head, LEFT side for base)
+- `replies` — array of reply comment bodies (for conversation context)
 
-For each unresolved comment:
+### Phase 2: Analyze & Apply (LOCAL ONLY)
 
-1. **Read** the target file at the specified line
-2. **Understand** what the comment is asking for
-3. **Decide:**
-   - Suggestion makes sense → Apply the fix using Edit tool
-   - Suggestion unclear/wrong → Flag it, skip, continue
-4. **Track** applied changes and skipped comments with reasons
+For each comment in JSON output:
+
+**Decision Tree:**
+
+```
+1. Is it a suggestion block? (hasSuggestion: true)
+   ├─ If suggestionCode is null → Treat as interpretive (parse failed, likely CRLF)
+   ├─ If outdated: true → Flag "GitHub marked stale"
+   └─ Does file at path:line contain originalCode?
+       ├─ Yes → Apply suggestionCode directly (replace lines)
+       └─ No → Flag "outdated suggestion — code has changed"
+
+2. Is it an interpretive comment?
+   ├─ Read target file, understand intent
+   ├─ Makes sense? → Edit file using Edit tool, track change
+   └─ Unclear/wrong? → Flag with reason
+
+3. Is it a question/discussion?
+   └─ Skip — not actionable
+```
 
 **Apply when:**
 - Corrects an actual bug or inconsistency
 - Aligns with project conventions
 - Localized fix that won't break other code
+- Suggestion block with matching target code
 
 **Flag and skip when:**
 - Misunderstands the code's intent
 - Would introduce a bug
 - Ambiguous or contradictory
-- Lack context to be confident
+- Insufficient context to apply confidently
+- Outdated suggestion (code has changed)
+- Question or discussion (not actionable)
 
-### Phase 3: Report & Offer Next Steps
+### Phase 3: Report Results
 
 Output during processing:
 ```
-✓ file.js:55 — Added null check before access
-⊘ config.ts:42 — SKIPPED: Conflicts with existing error handling pattern
+✓ file.js:55 — [suggestion] Applied null coalescing operator
+✓ config.ts:42 — [interpreted] Added error handling
+⊘ api.ts:18 — SKIPPED: Question, not actionable
+⊘ utils.js:30 — SKIPPED: Outdated suggestion — code has changed
 ```
 
 Summary report:
 ```
 ## PR Comment Resolution Summary
 
-**Applied:** 4 changes
-**Skipped:** 2 comments
+**Applied (suggestion):** N changes
+**Applied (interpreted):** M changes
+**Skipped:** K comments
 
 ### Applied Changes
-- `collect.sh:55` — Added empty NS check with error exit
-- `collect.sh:73` — Guarded NS2 with conditional
+- `file.js:55` — [suggestion] Replaced || with ??
+- `config.ts:42` — [interpreted] Added null check before access
 
 ### Skipped (Needs Review)
-- `config.js:42` — Suggestion conflicts with existing error handling pattern
-- `api.ts:18` — Ambiguous: unclear which validation to add
+- `api.ts:18` — Question, not actionable
+- `utils.js:30` — Outdated suggestion — code has changed
 
 ### Next Steps
 Would you like me to commit, push, and resolve the applied comments?
 ```
 
-### Phase 4: Verify Before Resolving
+### Phase 4: User Permission Gate
 
 <HARD-GATE>
-NEVER resolve a comment without verifying the fix is in the file. A resolved comment with no actual change is worse than an unresolved one.
+ASK: "Commit, push, and resolve N comments? [y/N]"
+STOP and wait for explicit "yes" before proceeding.
+NEVER commit changes or resolve threads without user permission.
 </HARD-GATE>
 
-After committing and pushing, verify EVERY applied fix before resolving its comment:
+### Phase 5: Verify, Commit, Push, Resolve
 
-1. For each applied change, grep or read the file to confirm the fix is present
-2. Output verification results:
+Only after user confirms:
+
+**Step 1: Commit changes**
+
+Use the format from `assets/commit-message.tpl`:
+```bash
+# Stage ONLY the files that were edited during Phase 2 (avoid git add -A)
+# Use the tracked list of applied changes to stage specific files
+git add <list-of-modified-files> && git commit -m "fix: address PR review comments
+
+Applied N changes from PR #123:
+- file.js:55 — [suggestion] Replaced || with ??
+- config.ts:42 — [interpreted] Added null check
+
+Skipped M comments (see PR for details)"
+```
+
+**Step 2: Push**
+```bash
+git push
+```
+
+**Step 3: Verify and resolve each applied fix**
+
+For each applied change, verify BEFORE resolving:
+```bash
+./scripts/verify-and-resolve.sh <owner> <repo> <thread_id> <file_path> "<search_pattern>" "<reply_message>"
+```
+
+The `<search_pattern>` should be a **plain literal substring** from the applied change (`grep -F` matches literally). Choose patterns that are:
+- Unique enough to verify the fix (a comment or variable name from the change)
+- Free of shell special characters (`!`, `$`, `` ` ``, `\`) — these get mangled inside double quotes
+- **Good:** `"Auto-append marker if caller"`, `"comments(first: 100)"`, `"addPullRequestReviewThreadReply"`
+- **Bad:** `'REPLY_MESSAGE" != *"$MARKER"'` (the `!` and `$` corrupt the pattern)
+
+The `<reply_message>` should follow the format in `assets/reply.tpl`: `"Fixed — <description>"`. The idempotency marker (`<!-- Applied by pr-comment-resolver -->`) is auto-appended by the script if missing — callers do not need to include it.
+
+For outdated threads already fixed in prior commits, use `--skip-verify`. Pass `-` as a placeholder for `<file_path>` and `<search_pattern>` (these args are ignored when `--skip-verify` is set, but must be present for positional parsing):
+```bash
+./scripts/verify-and-resolve.sh <owner> <repo> <thread_id> - - "<reply_message>" --skip-verify
+```
+
+**Parallel execution:** All verify-and-resolve calls can run in parallel for speed. However, if one call fails, the remaining parallel calls may be cancelled. Retry failed calls individually after the batch.
+
+Output verification results:
 ```
 Verifying fixes in files...
-✓ collect.sh:53 — VERIFIED: "Unable to determine authoritative nameserver" found
-✓ collect.sh:79 — VERIFIED: 'if [ -n "${NS2:-}" ]' found
-✗ README.md:18 — NOT FOUND: description unchanged
+✓ file.js:55 — VERIFIED: Pattern found, thread resolved
+✓ config.ts:42 — VERIFIED: Pattern found, thread resolved
+✗ api.ts:30 — NOT FOUND: Fix not in file, thread NOT resolved
+⊘ helpers.py — SKIPPED verification (outdated, --skip-verify), thread resolved
 ```
-3. Only resolve comments whose fixes are verified
-4. For any fix that fails verification, report it and DO NOT resolve the comment
 
-If user approves next steps:
-
-```bash
-# Commit changes
-git add -A && git commit -m "fix: address PR review comments"
-
-# Push
-git push
-
-# VERIFY each fix before resolving
-# For each applied comment, grep/read the file to confirm the change exists.
-# Only then reply and resolve:
-gh api repos/OWNER/REPO/pulls/NUMBER/comments/COMMENT_ID/replies \
-  -f body="Fixed — DESCRIPTION"
-
-gh api graphql -f query='mutation { resolveReviewThread(input: {threadId: "THREAD_ID"}) { thread { isResolved } } }'
-```
+**CRITICAL:** Only resolve comments whose fixes are verified present in the pushed code (or confirmed fixed via `--skip-verify` for outdated threads).
 
 ## Error Handling
 
-| Error | Action |
-|-------|--------|
-| PR not found | Exit: "PR not found. Check the URL format: owner/repo#number" |
-| No unresolved comments | Exit: "No unresolved comments found on this PR" |
-| File not in local repo | Skip: "File not found locally — comment may be on deleted file" |
-| `gh` CLI missing | Exit: "Install gh CLI: https://cli.github.com" |
-| Auth failure | Exit: "Run `gh auth login` to authenticate" |
-| Not on PR branch | Warn: "You may not be on the PR branch — changes might not match" |
+| Exit Code | Script | Meaning | Action |
+|-----------|--------|---------|--------|
+| 0 | fetch-unresolved.sh | Success | Continue |
+| 1 | fetch-unresolved.sh | Auth error | Stop: "Run `gh auth login`" |
+| 2 | fetch-unresolved.sh | PR not found or API error | Stop: "Verify PR URL; if correct, retry (may be transient)" |
+| 3 | fetch-unresolved.sh | Rate limited | Stop: "GitHub rate limit, try in 15 min" |
+| 0 | verify-and-resolve.sh | Resolved | Report success |
+| 1 | verify-and-resolve.sh | Verification failed | Report "Fix not found — NOT resolved" |
+| 2 | verify-and-resolve.sh | API error | Report "Failed to resolve — manual action needed" |
+| 3 | verify-and-resolve.sh | Already resolved | Skip silently |
 
-## Prerequisites
+## Edge Cases
 
-- `gh` CLI installed and authenticated (`gh auth status`)
-- Local clone of the repository
-- Ideally on the PR branch (`gh pr checkout NUMBER`)
+| Edge Case | Detection | Handling |
+|-----------|-----------|----------|
+| Comment on deleted file | `path` not in local repo | Skip: "File deleted — cannot apply" |
+| Outdated suggestion | `originalCode` not in file at line | Skip: "Code changed since suggestion" |
+| Binary file | File extension check | Skip: "Binary file — manual review needed" |
+| Merge conflict markers | `<<<<<<<` in target file | Stop: "Resolve merge conflicts first" |
+| Not on PR branch | Phase 0 branch check | Auto-switch via `gh pr checkout`; if fails, stop and ask user |
+| Empty PR | JSON output is `[]` | Exit: "No unresolved comments found" |
+| Deleted lines | Line number > file length | Skip: "Target line no longer exists" |
+
+## Known Pitfalls
+
+| Pitfall | Cause | Fix |
+|---------|-------|-----|
+| `FORBIDDEN` on reply posting | Using wrong GraphQL mutation | Script uses `addPullRequestReviewThreadReply` (not `addPullRequestReviewComment` which requires a pending review) |
+| Verification fails on valid fix | Shell special chars in search pattern (`!`, `$`, `` ` ``) | Choose plain alphanumeric substrings from the change |
+| Parallel resolve batch partially fails | One bad pattern cancels remaining calls | Retry failed calls individually after the batch completes |
+| Duplicate replies on retry | Caller omitted idempotency marker | Script auto-appends marker since v2.1; no action needed |
+| `originalCode` mismatch on RIGHT-side comments | Was extracting base side of diff | Fixed in v2.1 to extract PR head side (`+` lines) for RIGHT-side comments |
 
 ## Related Skills
 
