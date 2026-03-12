@@ -21,7 +21,7 @@ log_info() { echo "$*" >&2; }
 
 usage() {
     cat >&2 << EOF
-Usage: $(basename "$0") <owner> <repo> <thread_id> <comment_id> <file_path> <search_pattern> <reply_message> [--dry-run]
+Usage: $(basename "$0") <owner> <repo> <thread_id> <comment_id> <file_path> <search_pattern> <reply_message> [--dry-run] [--skip-verify]
 
 Verify a fix exists in the file, then reply and resolve the thread.
 
@@ -34,6 +34,7 @@ Arguments:
     search_pattern  Literal string to verify fix exists (grep -F)
     reply_message   Message to post as reply
     --dry-run       Show what would happen without making changes
+    --skip-verify   Skip file verification (for outdated/already-fixed threads)
 
 Exit codes:
     0   Success - thread resolved
@@ -43,17 +44,21 @@ Exit codes:
 
 Example:
     $(basename "$0") octocat hello-world PRT_xxx 12345 src/file.js "null check" "Fixed null check" --dry-run
+    $(basename "$0") octocat hello-world PRT_xxx 12345 - - "Already fixed" --skip-verify
 EOF
     exit 1
 }
 
 DRY_RUN=false
+SKIP_VERIFY=false
 
-# Parse arguments - extract --dry-run flag
+# Parse arguments - extract flags
 ARGS=()
 for arg in "$@"; do
     if [[ "$arg" == "--dry-run" ]]; then
         DRY_RUN=true
+    elif [[ "$arg" == "--skip-verify" ]]; then
+        SKIP_VERIFY=true
     else
         ARGS+=("$arg")
     fi
@@ -87,19 +92,22 @@ if ! command -v jq &> /dev/null; then
     exit 2
 fi
 
-# Step 1: Check if file exists
-if [[ ! -f "$FILE_PATH" ]]; then
-    log_error "File not found: $FILE_PATH"
-    exit 1
-fi
-
-# Step 2: Verify fix exists in file (literal string match)
-log_info "Verifying fix in $FILE_PATH..."
-if grep -qF "$SEARCH_PATTERN" "$FILE_PATH"; then
-    log_success "VERIFIED: Pattern found in file"
+# Step 1 & 2: Verify fix exists in file (unless --skip-verify)
+if [[ "$SKIP_VERIFY" == "true" ]]; then
+    log_info "Skipping file verification (--skip-verify)"
 else
-    log_error "VERIFICATION FAILED: Pattern '$SEARCH_PATTERN' not found in $FILE_PATH"
-    exit 1
+    if [[ ! -f "$FILE_PATH" ]]; then
+        log_error "File not found: $FILE_PATH"
+        exit 1
+    fi
+
+    log_info "Verifying fix in $FILE_PATH..."
+    if grep -qF "$SEARCH_PATTERN" "$FILE_PATH"; then
+        log_success "VERIFIED: Pattern found in file"
+    else
+        log_error "VERIFICATION FAILED: Pattern '$SEARCH_PATTERN' not found in $FILE_PATH"
+        exit 1
+    fi
 fi
 
 # Step 3: Check if thread is already resolved

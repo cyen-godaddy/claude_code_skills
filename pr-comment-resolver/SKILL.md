@@ -165,7 +165,12 @@ For each applied change, verify BEFORE resolving:
 ./scripts/verify-and-resolve.sh <owner> <repo> <thread_id> <comment_id> <file_path> "<search_pattern>" "<reply_message>"
 ```
 
-The `<search_pattern>` should be a unique substring from the applied change that confirms the fix is present (e.g., the new code that was added).
+The `<search_pattern>` should be a **plain literal substring** from the applied change (no shell escaping of brackets, quotes, etc.). For example, if the fix added `allowed_methods=["GET"]`, pass exactly that string — `grep -F` matches literally.
+
+For outdated threads already fixed in prior commits, use `--skip-verify`:
+```bash
+./scripts/verify-and-resolve.sh <owner> <repo> <thread_id> <comment_id> - - "<reply_message>" --skip-verify
+```
 
 Output verification results:
 ```
@@ -173,9 +178,10 @@ Verifying fixes in files...
 ✓ file.js:55 — VERIFIED: Pattern found, thread resolved
 ✓ config.ts:42 — VERIFIED: Pattern found, thread resolved
 ✗ api.ts:30 — NOT FOUND: Fix not in file, thread NOT resolved
+⊘ helpers.py — SKIPPED verification (outdated, --skip-verify), thread resolved
 ```
 
-**CRITICAL:** Only resolve comments whose fixes are verified present in the pushed code.
+**CRITICAL:** Only resolve comments whose fixes are verified present in the pushed code (or confirmed fixed via `--skip-verify` for outdated threads).
 
 ## Error Handling
 

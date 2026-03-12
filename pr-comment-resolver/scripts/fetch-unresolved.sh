@@ -75,6 +75,14 @@ fi
 
 # Retry wrapper for API calls
 # Retries on 5xx errors and rate limits (429), fails immediately on other 4xx
+#
+# Error detection uses the gh CLI exit code + GraphQL errors field, NOT body
+# text grep. Grepping the body caused false positives when PR comments
+# mentioned HTTP status codes like "500" or "server error".
+#
+# Returns: result on stdout, exit code 0 on success
+# On failure: prints nothing to stdout, returns non-zero
+# Callers MUST check the return code.
 retry_api() {
     local attempt=0
     local result
@@ -91,39 +99,73 @@ retry_api() {
         exit_code=$?
         set -e
 
-        # Check for rate limiting (429)
-        if echo "$result" | grep -qi "rate limit\|API rate limit exceeded\|429"; then
-            log_warn "Rate limited (attempt $((attempt + 1))/$MAX_RETRIES)"
+        if [[ $exit_code -eq 0 ]]; then
+            # gh succeeded — check for GraphQL-level errors
+            local gql_error
+            gql_error=$(echo "$result" | jq -r '.errors[0].type // empty' 2>/dev/null)
+
+            if [[ -z "$gql_error" ]]; then
+                # True success
+                echo "$result"
+                return 0
+            fi
+
+            # GraphQL error — classify by type
+            case "$gql_error" in
+                RATE_LIMITED)
+                    log_warn "GraphQL rate limited (attempt $((attempt + 1))/$MAX_RETRIES)"
+                    attempt=$((attempt + 1))
+                    continue
+                    ;;
+                NOT_FOUND)
+                    local msg
+                    msg=$(echo "$result" | jq -r '.errors[0].message // "Not found"')
+                    log_error "Not found: $msg"
+                    return 2
+                    ;;
+                *)
+                    local msg
+                    msg=$(echo "$result" | jq -r '.errors[0].message // "Unknown GraphQL error"')
+                    log_error "GraphQL error ($gql_error): $msg"
+                    return 2
+                    ;;
+            esac
+        fi
+
+        # gh CLI returned non-zero — check stderr for retryable conditions
+        # Use the exit code (not body grep) to distinguish error classes
+        # gh exits 4 for HTTP 4xx, exits 1 for network/server errors
+        if [[ $exit_code -eq 1 ]]; then
+            # Network or server error — retryable
+            log_warn "Server/network error (attempt $((attempt + 1))/$MAX_RETRIES)"
             attempt=$((attempt + 1))
             continue
+        elif [[ $exit_code -eq 4 ]]; then
+            # gh exit code 4 = HTTP 4xx client error
+            # Check for rate limit (403 with rate limit message) vs auth (401) vs not found (404)
+            if echo "$result" | grep -qi "rate limit"; then
+                log_warn "Rate limited (attempt $((attempt + 1))/$MAX_RETRIES)"
+                attempt=$((attempt + 1))
+                continue
+            elif echo "$result" | grep -qi "401\|unauthorized\|Bad credentials"; then
+                log_error "Authentication failed"
+                return 1
+            elif echo "$result" | grep -qi "404\|not found\|Could not resolve"; then
+                log_error "PR not found: $OWNER/$REPO#$PR_NUMBER"
+                return 2
+            else
+                log_error "Client error: $result"
+                return 2
+            fi
+        else
+            # Unknown exit code — not retryable
+            log_error "Unexpected error (exit $exit_code): $result"
+            return 2
         fi
-
-        # Check for server errors (5xx)
-        if echo "$result" | grep -qi "502\|503\|504\|500\|server error"; then
-            log_warn "Server error (attempt $((attempt + 1))/$MAX_RETRIES)"
-            attempt=$((attempt + 1))
-            continue
-        fi
-
-        # Check for auth errors (401) - fail immediately
-        if echo "$result" | grep -qi "401\|unauthorized\|authentication"; then
-            log_error "Authentication failed"
-            exit 1
-        fi
-
-        # Check for not found (404) - fail immediately
-        if echo "$result" | grep -qi "404\|not found\|Could not resolve"; then
-            log_error "PR not found: $OWNER/$REPO#$PR_NUMBER"
-            exit 2
-        fi
-
-        # Success or non-retryable error
-        echo "$result"
-        return $exit_code
     done
 
-    log_error "Rate limited after $MAX_RETRIES attempts"
-    exit 3
+    log_error "Exhausted $MAX_RETRIES retries"
+    return 3
 }
 
 # Fetch review threads with pagination
@@ -171,14 +213,23 @@ fetch_review_threads() {
         }'
 
         local response
+        local api_rc=0
         # Pass variables separately via -f (strings) and -F (non-strings)
+        # Capture exit code explicitly — set -e doesn't reliably propagate
+        # from functions called inside command substitution in all bash versions.
         if [[ -n "$cursor" ]]; then
-            response=$(retry_api gh api graphql -f query="$query" -f owner="$OWNER" -f repo="$REPO" -F pr="$PR_NUMBER" -f cursor="$cursor")
+            response=$(retry_api gh api graphql -f query="$query" -f owner="$OWNER" -f repo="$REPO" -F pr="$PR_NUMBER" -f cursor="$cursor") || api_rc=$?
         else
-            response=$(retry_api gh api graphql -f query="$query" -f owner="$OWNER" -f repo="$REPO" -F pr="$PR_NUMBER")
+            response=$(retry_api gh api graphql -f query="$query" -f owner="$OWNER" -f repo="$REPO" -F pr="$PR_NUMBER") || api_rc=$?
         fi
 
-        # Check for errors in response
+        if [[ $api_rc -ne 0 ]]; then
+            log_error "API call failed (exit $api_rc)"
+            exit $api_rc
+        fi
+
+        # Double-check for GraphQL errors (retry_api handles these too,
+        # but belt-and-suspenders for edge cases)
         if echo "$response" | jq -e '.errors' > /dev/null 2>&1; then
             local error_msg
             error_msg=$(echo "$response" | jq -r '.errors[0].message // "Unknown error"')
