@@ -1,151 +1,188 @@
 ---
 name: ess-error-search
-description: Use when searching for application errors, exceptions, or service failures in ESS/Elasticsearch logs. Triggers on phrases like "find errors", "check logs", "debug service", "look for failures in ESS".
+description: Use when searching for application errors, exceptions, or service failures in ESS/Elasticsearch logs. Triggers on phrases like "find errors", "check logs", "debug service", "look for failures in ESS", "search ESSP", "check nginx errors", "valuation logs".
 ---
 
 # ESS Error Search
 
 ## Overview
 
-Query the Atlas-AI Elastic Cloud cluster to find service errors and exceptions. The cluster stores logs from Katana-deployed services (ans-registry-poc, ans-auth, agent2agent, etc.).
+Query Elastic Cloud (ESSP) clusters to find service errors and exceptions. Multiple clusters exist for different services. Always start by identifying the correct cluster and credentials.
 
-## Quick Reference
+## Clusters
 
-| Item | Value |
-|------|-------|
-| Cluster | `https://91e8e2e1c24c4816b97eaa64847e3813.es.us-west-2.aws.found.io:9243` |
-| Kibana | `https://1f69e876baa04d0d8ebfef9cb217e676.kb.us-west-2.aws.found.io:9243` |
-| Auth | Basic auth `admin:<password>` |
-| Creds | `essp_creds` file or AWS Secrets Manager `essp_deployment_credentials` |
-| Index pattern | `.ds-logs-gdelastic.katana.{app}-{env}-*` |
+| Cluster | Key in `~/essp_creds` | Services |
+|---------|----------------------|----------|
+| **Valuation** | `valuation` | valuation-api, valuation-proxy, rate-limiter, valuation-auth, valuation-batch |
+| **Atlas-AI** | `atlas` | ans-registry-poc, ans-auth, agent2agent |
 
-## Log Structure
+## Credentials
 
-| Field | Description |
-|-------|-------------|
-| `@timestamp` | ISO 8601 timestamp |
-| `message` | Raw log text (includes embedded timestamp, logger, level) |
-| `container_name` | Service name (e.g., `ans-registry-poc`) |
-| `KATANA_APP` | Katana application name |
-| `KATANA_ENVIRONMENT` | Environment (prod, ote, test, dev-private) |
-| `GD_ENV` | GoDaddy environment |
-| `GD_REGION` | AWS region |
+Stored in `~/essp_creds` as a multi-account JSON keyed by cluster name:
+
+```json
+{
+  "valuation": { "ingestion_url": "...", "ingestion_user": "admin", "ingestion_user_password": "..." },
+  "atlas": { "ingestion_url": "...", "ingestion_user": "admin", "ingestion_user_password": "..." }
+}
+```
+
+### Adding a New Account
+
+```bash
+# Fetch from AWS Secrets Manager and merge into ~/essp_creds
+NEW_CREDS=$(aws secretsmanager get-secret-value --secret-id essp_deployment_credentials --query SecretString --output text)
+jq --argjson new "$NEW_CREDS" '.new_cluster_name = $new' ~/essp_creds > /tmp/essp_creds && mv /tmp/essp_creds ~/essp_creds
+```
+
+### Reading Credentials
+
+```bash
+CLUSTER="valuation"
+ESS_URL=$(jq -r ".$CLUSTER.ingestion_url" ~/essp_creds)
+ESS_PASS=$(jq -r ".$CLUSTER.ingestion_user_password" ~/essp_creds)
+ESS_AUTH="$(jq -r ".$CLUSTER.ingestion_user" ~/essp_creds):$ESS_PASS"
+```
+
+## Systematic Error Investigation
+
+Follow this order — do NOT skip steps:
+
+1. **List indices** to find correct index pattern
+2. **Sample docs** (size=3) to discover field names
+3. **Check field mappings** for keyword vs text types
+4. **Aggregate** to get error counts/distribution
+5. **Get error samples** with relevant filters
+
+## Index Patterns by Cluster
+
+### Valuation Cluster
+
+| Log Type | Index Pattern | Key Fields |
+|----------|---------------|------------|
+| Nginx access logs | `nginx-prod-prod*` | `response_code` (string), `url`, `http_method`, `request_time`, `remote_host`, `agent` |
+| App logs (firehose) | `.ds-logs-gdelastic.firehose-prod*` | `message` (contains embedded JSON/text), `kubernetes.container_name` (keyword type, no `.keyword` suffix) |
+
+### Atlas-AI Cluster
+
+| Log Type | Index Pattern | Key Fields |
+|----------|---------------|------------|
+| Katana app logs | `.ds-logs-gdelastic.katana.{app}-{env}-*` | `message`, `container_name`, `KATANA_APP`, `KATANA_ENVIRONMENT` |
 
 ## Common Queries
 
-### Find Recent Errors
+### Step 1: List Available Indices
 
 ```bash
-ESS_URL="https://91e8e2e1c24c4816b97eaa64847e3813.es.us-west-2.aws.found.io:9243"
-ESS_AUTH="admin:$(jq -r .ingestion_user_password essp_creds)"
-
-curl -s -u "$ESS_AUTH" "$ESS_URL/.ds-logs-gdelastic.katana.ans-registry-poc-*,.ds-logs-gdelastic.katana.ans-auth-*/_search" \
-  -H 'Content-Type: application/json' -d '{
-  "size": 20,
-  "sort": [{"@timestamp": "desc"}],
-  "query": {"match_phrase": {"message": "ERROR"}}
-}' | jq '.hits.hits[]._source | {ts: .["@timestamp"], app: .container_name, msg: .message[:300]}'
+curl -s -u "$ESS_AUTH" "$ESS_URL/_cat/indices/INDEX_PATTERN*?h=index,docs.count,store.size&s=index:desc" | head -10
 ```
 
-### Filter by Service and Time
+### Step 2: Sample Documents to Discover Fields
 
 ```bash
-curl -s -u "$ESS_AUTH" "$ESS_URL/.ds-logs-gdelastic.katana.ans-registry-poc-prod-*/_search" \
-  -H 'Content-Type: application/json' -d '{
-  "size": 50,
-  "sort": [{"@timestamp": "desc"}],
-  "query": {
-    "bool": {
-      "must": [{"match_phrase": {"message": "ERROR"}}],
-      "filter": [{"range": {"@timestamp": {"gte": "now-1h"}}}]
-    }
-  }
-}' | jq '.hits.hits[]._source.message'
+curl -s -u "$ESS_AUTH" "$ESS_URL/INDEX_PATTERN*/_search" -H 'Content-Type: application/json' -d '{
+  "size": 3, "sort": [{"@timestamp": "desc"}],
+  "query": {"range": {"@timestamp": {"gte": "now-24h"}}}
+}' | python3 -m json.tool | head -80
 ```
 
-### Search for Specific Exception
+### Step 3: Aggregate Status Codes (Nginx)
 
 ```bash
-curl -s -u "$ESS_AUTH" "$ESS_URL/.ds-logs-gdelastic.katana.ans-registry-poc-*,.ds-logs-gdelastic.katana.ans-auth-*/_search" \
-  -H 'Content-Type: application/json' -d '{
-  "size": 20,
-  "query": {
-    "bool": {
-      "must": [
-        {"match_phrase": {"message": "ConnectionTimeout"}},
-        {"match_phrase": {"message": "sso.godaddy.com"}}
-      ]
-    }
-  }
-}' | jq '.hits.hits[]._source.message'
-```
-
-### Count Errors by Service (Last 24h)
-
-```bash
-curl -s -u "$ESS_AUTH" "$ESS_URL/.ds-logs-gdelastic.katana.ans-registry-poc-*,.ds-logs-gdelastic.katana.ans-auth-*/_search" \
-  -H 'Content-Type: application/json' -d '{
+curl -s -u "$ESS_AUTH" "$ESS_URL/nginx-prod-prod*/_search" -H 'Content-Type: application/json' -d '{
   "size": 0,
-  "query": {
-    "bool": {
-      "must": [{"match": {"message": "ERROR"}}],
-      "filter": [{"range": {"@timestamp": {"gte": "now-24h"}}}]
-    }
-  },
-  "aggs": {
-    "by_service": {"terms": {"field": "container_name", "size": 20}}
-  }
-}' | jq '{total: .hits.total.value, by_service: .aggregations.by_service.buckets}'
+  "query": {"range": {"@timestamp": {"gte": "now-24h"}}},
+  "aggs": {"status_codes": {"terms": {"field": "response_code.keyword", "size": 20, "order": {"_key": "asc"}}}}
+}'
 ```
 
-## Target Services
+### Step 4: Get 5xx Errors (Nginx)
 
-Only two services are monitored:
-
-| Service | Index Pattern | Description |
-|---------|---------------|-------------|
-| `ans-registry-poc` | `.ds-logs-gdelastic.katana.ans-registry-poc-*` | ANS Registry API |
-| `ans-auth` | `.ds-logs-gdelastic.katana.ans-auth-*` | Auth service |
-
-**Combined index for both:**
+```bash
+curl -s -u "$ESS_AUTH" "$ESS_URL/nginx-prod-prod*/_search" -H 'Content-Type: application/json' -d '{
+  "size": 20, "sort": [{"@timestamp": "desc"}],
+  "query": {"bool": {"must": [
+    {"range": {"@timestamp": {"gte": "now-24h"}}},
+    {"terms": {"response_code.keyword": ["500","502","503","504"]}}
+  ]}},
+  "_source": ["@timestamp", "response_code", "url", "http_method", "request_time", "remote_host", "kubernetes.pod_name"]
+}'
 ```
-.ds-logs-gdelastic.katana.ans-registry-poc-*,.ds-logs-gdelastic.katana.ans-auth-*
+
+### Step 5: Aggregate by Container (App Logs)
+
+```bash
+curl -s -u "$ESS_AUTH" "$ESS_URL/.ds-logs-gdelastic.firehose-prod*/_search" -H 'Content-Type: application/json' -d '{
+  "size": 0,
+  "query": {"range": {"@timestamp": {"gte": "now-24h"}}},
+  "aggs": {"containers": {"terms": {"field": "kubernetes.container_name", "size": 30}}}
+}'
 ```
 
-## Error Patterns to Search
+### Step 6: Find App Errors (Firehose, Excluding Noise)
 
-| Pattern | Meaning |
-|---------|---------|
-| `ERROR` | Application error level logs |
-| `Exception` | Java/Kotlin stack traces |
-| `failed` | Operation failures |
-| `timeout` | Connection/request timeouts |
-| `refused` | Connection refused |
-| `unauthorized` | Auth failures (401) |
-| `forbidden` | Permission denied (403) |
+```bash
+curl -s -u "$ESS_AUTH" "$ESS_URL/.ds-logs-gdelastic.firehose-prod*/_search" -H 'Content-Type: application/json' -d '{
+  "size": 15, "sort": [{"@timestamp": "desc"}],
+  "query": {"bool": {
+    "must": [
+      {"range": {"@timestamp": {"gte": "now-24h"}}},
+      {"terms": {"kubernetes.container_name": ["valuation-api", "valuation-api-batch", "valuation-batch", "valuation-auth", "rate-limiter"]}},
+      {"bool": {"should": [
+        {"match_phrase": {"message": "Traceback"}},
+        {"match_phrase": {"message": "Exception"}},
+        {"match_phrase": {"message": "failed call"}},
+        {"match_phrase": {"message": "CRITICAL"}}
+      ]}}
+    ],
+    "must_not": [{"match_phrase": {"message": "valstats"}}]
+  }},
+  "_source": ["@timestamp", "message", "kubernetes.container_name", "kubernetes.pod_name"]
+}'
+```
+
+## Gotchas and Noise Filters
+
+| Issue | Solution |
+|-------|----------|
+| `response_code` is string, not int | Use `response_code.keyword` with string values `"500"` not `500` |
+| `kubernetes.container_name` is already keyword type | Do NOT use `.keyword` suffix — use field name directly |
+| `valstats` JSON lines match "error" | Add `must_not: match_phrase "valstats"` to exclude stats reporting |
+| CloudWatch agent logs contain `container_last_termination_reason: "Error"` | Filter by specific container names to exclude infra noise |
+| TensorFlow deprecation warnings flood results | These are benign startup noise — `WARNING tensorflow` and `PythonDeprecationWarning` |
+| `failed call to cuInit: UNKNOWN ERROR (303)` | Expected on CPU-only nodes (no GPU), harmless |
+| Aggregation returns empty buckets | Check field mapping — keyword fields don't need `.keyword`, text fields do |
+
+## Valuation Container Names
+
+| Container | Purpose |
+|-----------|---------|
+| `valuation-api` | Main ML API (internal traffic) |
+| `valuation-api-batch` | Batch processing API |
+| `valuation-batch` | Batch job runner |
+| `valuation-auth` | Auth service |
+| `valuation-frontend` | React web UI |
+| `rate-limiter` | Rate limiting sidecar |
+| `cluster-autoscaler` | K8s autoscaler (infra, usually noise) |
+| `cloudwatch-agent` | Metrics collection (infra, usually noise) |
 
 ## Helper Script
 
-Use `ess-query.sh` for quick lookups:
+Use `ess-query.sh` for quick lookups (reads `~/essp_creds` by default):
 
 ```bash
-# Usage: ./ess-query.sh [service] [hours] [pattern]
-CREDS_FILE=path/to/essp_creds ./ess-query.sh '*' 24 ERROR      # All services, last 24h
-CREDS_FILE=path/to/essp_creds ./ess-query.sh ans-auth 1 timeout # Auth service, last 1h, timeouts
+./ess-query.sh valuation nginx 24 502          # Valuation nginx 502s, last 24h
+./ess-query.sh valuation valuation-api 24 ERROR # Valuation app errors, last 24h
+./ess-query.sh atlas ans-auth 1 timeout         # Atlas-AI auth timeouts, last 1h
+./ess-query.sh atlas '*' 24 ERROR               # Atlas-AI all services, last 24h
 ```
 
 ## Troubleshooting
 
-**No results?**
-- Check index pattern matches actual indices (`_cat/indices?v`)
-- Verify time range includes data
-- Try broader query (remove filters)
-
-**Auth failed?**
-- Refresh credentials from `essp_creds` or Secrets Manager
-- Check password hasn't rotated
-
-**Slow queries?**
-- Add time range filter
-- Use specific index instead of wildcard
-- Reduce `size` parameter
+| Symptom | Fix |
+|---------|-----|
+| No results | Check index name with `_cat/indices`, verify time range, broaden query |
+| Auth failed | Check `~/essp_creds` has correct cluster key; re-fetch from Secrets Manager if password rotated |
+| Slow queries | Add time range filter, use specific index (not wildcard), reduce `size` |
+| 0 shards searched | Index pattern doesn't match any indices — list indices first |
+| Empty aggregation buckets | Field type mismatch — check `_mapping/field/FIELDNAME` |

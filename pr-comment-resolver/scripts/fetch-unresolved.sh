@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck shell=bash
 set -euo pipefail
 
 # fetch-unresolved.sh - Fetch all unresolved PR comments with pagination
@@ -13,13 +14,25 @@ RED='\033[0;31m'
 YELLOW='\033[0;33m'
 NC='\033[0m'
 
+VERBOSE=false
+
 log_error() { echo -e "${RED}ERROR:${NC} $*" >&2; }
 log_warn() { echo -e "${YELLOW}WARN:${NC} $*" >&2; }
 log_info() { echo "$*" >&2; }
+log_debug() { [[ "$VERBOSE" == "true" ]] && echo -e "DEBUG: $*" >&2 || true; }
+
+# Temp file tracking + cleanup on exit/interrupt
+_TEMP_FILES=()
+cleanup() {
+    for f in "${_TEMP_FILES[@]}"; do
+        rm -f "$f"
+    done
+}
+trap cleanup EXIT INT TERM
 
 usage() {
     cat >&2 << EOF
-Usage: $(basename "$0") <owner> <repo> <pr_number>
+Usage: $(basename "$0") <owner> <repo> <pr_number> [--verbose]
 
 Fetch all unresolved PR review comments with pagination and retry logic.
 
@@ -27,6 +40,7 @@ Arguments:
     owner       Repository owner (e.g., 'octocat')
     repo        Repository name (e.g., 'hello-world')
     pr_number   Pull request number (e.g., '123')
+    --verbose   Enable debug logging (API calls, retry attempts, transforms)
 
 Exit codes:
     0   Success - JSON output on stdout
@@ -36,18 +50,28 @@ Exit codes:
 
 Example:
     $(basename "$0") octocat hello-world 123
+    $(basename "$0") octocat hello-world 123 --verbose
 EOF
     exit 1
 }
 
-# Validate arguments
-if [[ $# -ne 3 ]]; then
+# Parse arguments - extract flags
+ARGS=()
+for arg in "$@"; do
+    if [[ "$arg" == "--verbose" ]]; then
+        VERBOSE=true
+    else
+        ARGS+=("$arg")
+    fi
+done
+
+if [[ ${#ARGS[@]} -ne 3 ]]; then
     usage
 fi
 
-OWNER="$1"
-REPO="$2"
-PR_NUMBER="$3"
+OWNER="${ARGS[0]}"
+REPO="${ARGS[1]}"
+PR_NUMBER="${ARGS[2]}"
 
 # Validate PR number is numeric
 if ! [[ "$PR_NUMBER" =~ ^[0-9]+$ ]]; then
@@ -91,12 +115,13 @@ retry_api() {
 
     while [[ $attempt -lt $MAX_RETRIES ]]; do
         if [[ ${RETRY_DELAYS[$attempt]} -gt 0 ]]; then
+            log_debug "Retry attempt $((attempt + 1))/$MAX_RETRIES, backoff ${RETRY_DELAYS[$attempt]}s"
             log_info "Retrying in ${RETRY_DELAYS[$attempt]}s..."
             sleep "${RETRY_DELAYS[$attempt]}"
         fi
 
         local stderr_tmp
-        stderr_tmp=$(mktemp)
+        stderr_tmp=$(mktemp); _TEMP_FILES+=("$stderr_tmp")
         set +e
         result=$("$@" 2>"$stderr_tmp")
         exit_code=$?
@@ -105,6 +130,7 @@ retry_api() {
         stderr_content=$(cat "$stderr_tmp"; rm -f "$stderr_tmp")
 
         if [[ $exit_code -eq 0 ]]; then
+            log_debug "gh exited 0 (attempt $((attempt + 1)))"
             # gh succeeded — validate response is JSON before proceeding
             if ! echo "$result" | jq -e . > /dev/null 2>&1; then
                 log_warn "Non-JSON response from gh (attempt $((attempt + 1))/$MAX_RETRIES)"
@@ -206,7 +232,9 @@ fetch_review_threads() {
     local all_threads="[]"
 
     while [[ "$has_next" == "true" ]]; do
+        log_debug "Fetching page (cursor: ${cursor:-none})"
         # Use GraphQL variables to prevent injection (owner/repo could contain special chars)
+        # shellcheck disable=SC2016  # GraphQL variables use $, not shell expansion
         local query='
         query($owner: String!, $repo: String!, $pr: Int!, $cursor: String) {
           repository(owner: $owner, name: $repo) {
@@ -294,10 +322,11 @@ transform_threads() {
             if test("```suggestion") then
                 {
                     hasSuggestion: true,
-                    suggestionCode: (capture("```suggestion\n(?<code>[\\s\\S]*?)\n```") | .code // null)
+                    suggestionCode: (capture("```suggestion[^\n]*\n(?<code>[\\s\\S]*?)\n```") | .code // null),
+                    suggestionRange: (capture("```suggestion(?<range>[:-][^\n]+)") | .range // null) // null
                 }
             else
-                {hasSuggestion: false, suggestionCode: null}
+                {hasSuggestion: false, suggestionCode: null, suggestionRange: null}
             end
         ) as $suggestion |
         # Extract original code from diffHunk based on diff side
@@ -331,20 +360,31 @@ transform_threads() {
             originalCode: $originalCode,
             hasSuggestion: $suggestion.hasSuggestion,
             suggestionCode: $suggestion.suggestionCode,
+            suggestionRange: $suggestion.suggestionRange,
             replies: [.comments.nodes[1:][].body // empty]
         }]
     '
 }
 
 # Main execution
+log_debug "Args: owner=$OWNER repo=$REPO pr=$PR_NUMBER verbose=$VERBOSE"
 log_info "Fetching unresolved comments for $OWNER/$REPO#$PR_NUMBER..."
 
 raw_threads=$(fetch_review_threads)
 thread_count=$(echo "$raw_threads" | jq 'length')
 log_info "Found $thread_count total review threads"
 
+log_debug "Transforming threads to output format"
 transformed=$(transform_threads "$raw_threads")
 unresolved_count=$(echo "$transformed" | jq 'length')
+log_debug "Filtered: $thread_count total → $unresolved_count unresolved"
+
+# Warn about PR-level comments (no path) that are filtered out
+pr_level_count=$(echo "$raw_threads" | jq '[.[] | select(.isResolved == false and .path == null)] | length')
+if [[ "$pr_level_count" -gt 0 ]]; then
+    log_warn "$pr_level_count PR-level comment(s) without file path (not included in output)"
+fi
+
 log_info "Found $unresolved_count unresolved threads"
 
 # Output final JSON

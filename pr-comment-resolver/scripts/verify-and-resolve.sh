@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
+# shellcheck shell=bash
 set -euo pipefail
 
 # verify-and-resolve.sh - Verify fix exists, reply, resolve thread
-# Usage: ./verify-and-resolve.sh <owner> <repo> <thread_id> <file_path> <search_pattern> <reply_message> [--dry-run]
+# Usage: ./verify-and-resolve.sh <owner> <repo> <thread_id> <file_path> <search_pattern> <reply_message> [--dry-run] [--skip-verify] [--verbose]
 # Exit codes: 0=resolved, 1=verification failed, 2=API error, 3=already resolved
 #
 # NOTE: This script verifies fixes using simple grep pattern matching.
@@ -14,10 +15,69 @@ GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
 NC='\033[0m'
 
+VERBOSE=false
+
 log_error() { echo -e "${RED}ERROR:${NC} $*" >&2; }
 log_success() { echo -e "${GREEN}OK:${NC} $*" >&2; }
 log_warn() { echo -e "${YELLOW}WARN:${NC} $*" >&2; }
 log_info() { echo "$*" >&2; }
+log_debug() { [[ "$VERBOSE" == "true" ]] && echo -e "DEBUG: $*" >&2 || true; }
+
+# Temp file tracking + cleanup on exit/interrupt
+_TEMP_FILES=()
+# shellcheck disable=SC2329  # invoked by trap
+cleanup() {
+    for f in "${_TEMP_FILES[@]}"; do
+        rm -f "$f"
+    done
+}
+trap cleanup EXIT INT TERM
+
+readonly MAX_RETRIES=3
+readonly RETRY_DELAYS=(0 2 5)
+
+# Retry wrapper for gh API calls
+# Retries on exit code 1 (network/server error) only; fails immediately on other codes
+# Returns: result on stdout, exit code 0 on success
+retry_gh_api() {
+    local attempt=0
+    local result
+    local exit_code
+    local stderr_tmp
+
+    while [[ $attempt -lt $MAX_RETRIES ]]; do
+        if [[ ${RETRY_DELAYS[$attempt]} -gt 0 ]]; then
+            log_debug "Retry attempt $((attempt + 1))/$MAX_RETRIES, backoff ${RETRY_DELAYS[$attempt]}s"
+            log_info "Retrying in ${RETRY_DELAYS[$attempt]}s..."
+            sleep "${RETRY_DELAYS[$attempt]}"
+        fi
+
+        stderr_tmp=$(mktemp); _TEMP_FILES+=("$stderr_tmp")
+        set +e
+        result=$("$@" 2>"$stderr_tmp")
+        exit_code=$?
+        set -e
+
+        if [[ $exit_code -eq 0 ]]; then
+            log_debug "API call succeeded (attempt $((attempt + 1)))"
+            echo "$result"
+            return 0
+        fi
+
+        if [[ $exit_code -eq 1 ]]; then
+            log_warn "Server/network error (attempt $((attempt + 1))/$MAX_RETRIES): $(cat "$stderr_tmp")"
+            attempt=$((attempt + 1))
+            continue
+        fi
+
+        # Non-retryable error
+        log_error "API error (exit $exit_code): $(cat "$stderr_tmp")"
+        return $exit_code
+    done
+
+    log_error "Server/network error after $MAX_RETRIES retries"
+    return 2
+}
 
 usage() {
     cat >&2 << EOF
@@ -35,6 +95,7 @@ Arguments:
     --dry-run       Show what would happen without making changes
     --skip-verify   Skip file verification (for outdated/already-fixed threads).
                     Use '-' as placeholder for <file_path> and <search_pattern>.
+    --verbose       Enable debug logging (API calls, retry attempts, checks)
 
 Exit codes:
     0   Success - thread resolved
@@ -59,6 +120,8 @@ for arg in "$@"; do
         DRY_RUN=true
     elif [[ "$arg" == "--skip-verify" ]]; then
         SKIP_VERIFY=true
+    elif [[ "$arg" == "--verbose" ]]; then
+        VERBOSE=true
     else
         ARGS+=("$arg")
     fi
@@ -92,7 +155,10 @@ if ! command -v jq &> /dev/null; then
 fi
 
 # Step 1: Check if thread is already resolved (before any local verification)
+log_debug "Args: owner=$OWNER repo=$REPO thread=$THREAD_ID file=$FILE_PATH"
+log_debug "Flags: dry_run=$DRY_RUN skip_verify=$SKIP_VERIFY verbose=$VERBOSE"
 log_info "Checking thread status..."
+# shellcheck disable=SC2016  # GraphQL variables use $, not shell expansion
 check_query='
 query($id: ID!) {
   node(id: $id) {
@@ -102,8 +168,9 @@ query($id: ID!) {
   }
 }'
 
-status_response=$(gh api graphql -f query="$check_query" -f id="$THREAD_ID" 2>&1) || {
-    log_error "Failed to check thread status: $status_response"
+log_debug "API call: check thread isResolved for $THREAD_ID"
+status_response=$(retry_gh_api gh api graphql -f query="$check_query" -f id="$THREAD_ID") || {
+    log_error "Failed to check thread status"
     exit 2
 }
 
@@ -139,6 +206,7 @@ else
     fi
 
     log_info "Verifying fix in $FILE_PATH..."
+    log_debug "grep -F pattern: '$SEARCH_PATTERN'"
     if grep -qF "$SEARCH_PATTERN" "$FILE_PATH"; then
         log_success "VERIFIED: Pattern found in file"
     else
@@ -167,6 +235,7 @@ if [[ "$REPLY_MESSAGE" != *"$MARKER"* ]]; then
 ${MARKER}"
 fi
 
+# shellcheck disable=SC2016  # GraphQL variables use $, not shell expansion
 thread_query='
 query($threadId: ID!) {
   node(id: $threadId) {
@@ -181,17 +250,21 @@ query($threadId: ID!) {
   }
 }'
 
-thread_response=$(gh api graphql -f query="$thread_query" -f threadId="$THREAD_ID" 2>&1) || {
+thread_response=$(retry_gh_api gh api graphql -f query="$thread_query" -f threadId="$THREAD_ID") || {
     log_warn "Could not fetch existing thread comments, proceeding with post"
     thread_response=""
 }
 
+log_debug "API call: fetch thread comments for idempotency check"
 if [[ -n "$thread_response" ]] && echo "$thread_response" | jq -e --arg marker "$MARKER" '.data.node.comments.nodes[] | select(.body | contains($marker))' > /dev/null 2>&1; then
+    log_debug "Idempotency: found existing reply with marker"
     log_warn "Reply already posted (found marker), skipping to resolve"
 else
     # Step 4: Post reply via GraphQL using addPullRequestReviewThreadReply
     # This mutation replies directly to a review thread by its node ID
+    log_debug "Idempotency: no existing reply found, will post"
     log_info "Posting reply to thread $THREAD_ID..."
+    # shellcheck disable=SC2016  # GraphQL variables use $, not shell expansion
     reply_mutation='
 mutation($threadId: ID!, $body: String!) {
   addPullRequestReviewThreadReply(input: {pullRequestReviewThreadId: $threadId, body: $body}) {
@@ -201,8 +274,9 @@ mutation($threadId: ID!, $body: String!) {
   }
 }'
 
-    reply_response=$(gh api graphql -f query="$reply_mutation" -f threadId="$THREAD_ID" -f body="$REPLY_MESSAGE" 2>&1) || {
-        log_error "Failed to post reply: $reply_response"
+    log_debug "API call: addPullRequestReviewThreadReply"
+    reply_response=$(retry_gh_api gh api graphql -f query="$reply_mutation" -f threadId="$THREAD_ID" -f body="$REPLY_MESSAGE") || {
+        log_error "Failed to post reply"
         exit 2
     }
 
@@ -217,6 +291,7 @@ fi
 
 # Step 5: Resolve the thread
 log_info "Resolving thread $THREAD_ID..."
+# shellcheck disable=SC2016  # GraphQL variables use $, not shell expansion
 resolve_mutation='
 mutation($threadId: ID!) {
   resolveReviewThread(input: {threadId: $threadId}) {
@@ -226,8 +301,9 @@ mutation($threadId: ID!) {
   }
 }'
 
-resolve_response=$(gh api graphql -f query="$resolve_mutation" -f threadId="$THREAD_ID" 2>&1) || {
-    log_error "Failed to resolve thread: $resolve_response"
+log_debug "API call: resolveReviewThread"
+resolve_response=$(retry_gh_api gh api graphql -f query="$resolve_mutation" -f threadId="$THREAD_ID") || {
+    log_error "Failed to resolve thread"
     exit 2
 }
 
