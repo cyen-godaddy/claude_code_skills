@@ -27,9 +27,11 @@ log_debug() { [[ "$VERBOSE" == "true" ]] && echo -e "DEBUG: $*" >&2 || true; }
 _TEMP_FILES=()
 # shellcheck disable=SC2329  # invoked by trap
 cleanup() {
-    for f in "${_TEMP_FILES[@]}"; do
-        rm -f "$f"
-    done
+    if [[ ${#_TEMP_FILES[@]} -gt 0 ]]; then
+        for f in "${_TEMP_FILES[@]}"; do
+            rm -f "$f"
+        done
+    fi
 }
 trap cleanup EXIT INT TERM
 

@@ -24,9 +24,11 @@ log_debug() { [[ "$VERBOSE" == "true" ]] && echo -e "DEBUG: $*" >&2 || true; }
 # Temp file tracking + cleanup on exit/interrupt
 _TEMP_FILES=()
 cleanup() {
-    for f in "${_TEMP_FILES[@]}"; do
-        rm -f "$f"
-    done
+    if [[ ${#_TEMP_FILES[@]} -gt 0 ]]; then
+        for f in "${_TEMP_FILES[@]}"; do
+            rm -f "$f"
+        done
+    fi
 }
 trap cleanup EXIT INT TERM
 
@@ -323,7 +325,7 @@ transform_threads() {
                 {
                     hasSuggestion: true,
                     suggestionCode: (capture("```suggestion[^\n]*\n(?<code>[\\s\\S]*?)\n```") | .code // null),
-                    suggestionRange: (capture("```suggestion(?<range>[:-][^\n]+)") | .range // null) // null
+                    suggestionRange: (try (capture("```suggestion(?<range>[:-][^\n]+)") | .range) catch null)
                 }
             else
                 {hasSuggestion: false, suggestionCode: null, suggestionRange: null}

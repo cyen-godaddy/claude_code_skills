@@ -40,6 +40,16 @@ Accept PR URLs in any format:
 - `owner/repo#123`
 - Just `123` if already in the repo
 
+## Script Paths
+
+**CRITICAL:** All script and asset paths MUST use the skill's base directory, NOT the current working directory. The base directory is provided at the top of this skill when it loads (e.g., `Base directory for this skill: /path/to/skill`). Set this variable before running any commands:
+
+```bash
+SKILL_DIR="<base directory from skill header>"
+```
+
+Use `${SKILL_DIR}/scripts/` and `${SKILL_DIR}/assets/` for all script and asset references throughout this skill.
+
 ## Execution
 
 ### Phase 0: Verify Branch
@@ -74,7 +84,7 @@ git status
 
 ```bash
 # Extract owner/repo/number from URL, then run:
-./scripts/fetch-unresolved.sh <owner> <repo> <pr_number>
+${SKILL_DIR}/scripts/fetch-unresolved.sh <owner> <repo> <pr_number>
 ```
 
 Script handles:
@@ -267,7 +277,7 @@ git push
 
 For each applied change, verify BEFORE resolving:
 ```bash
-./scripts/verify-and-resolve.sh <owner> <repo> <thread_id> <file_path> "<search_pattern>" "<reply_message>"
+${SKILL_DIR}/scripts/verify-and-resolve.sh <owner> <repo> <thread_id> <file_path> "<search_pattern>" "<reply_message>"
 ```
 
 The `<search_pattern>` should be a **plain literal substring** from the NEW code you wrote or the `suggestionCode` you applied (`grep -F` matches literally). Choose patterns that are:
@@ -277,7 +287,7 @@ The `<search_pattern>` should be a **plain literal substring** from the NEW code
 - **Good:** `"Auto-append marker if caller"`, `"comments(first: 100)"`, `"addPullRequestReviewThreadReply"`
 - **Bad:** `'REPLY_MESSAGE" != *"$MARKER"'` (the `!` and `$` corrupt the pattern)
 
-The `<reply_message>` should follow the format in `assets/reply.tpl`: `"Fixed — <description>"`. The idempotency marker (`<!-- Applied by pr-comment-resolver -->`) is auto-appended by the script if missing — callers do not need to include it.
+The `<reply_message>` should follow the format in `${SKILL_DIR}/assets/reply.tpl`: `"Fixed — <description>"`. The idempotency marker (`<!-- Applied by pr-comment-resolver -->`) is auto-appended by the script if missing — callers do not need to include it.
 
 **When to use `--skip-verify`:** Use for threads where verification against the local file is impossible or unnecessary:
 - `outdated: true` AND `originalCode` doesn't match the current file (code changed since review)
@@ -286,7 +296,7 @@ The `<reply_message>` should follow the format in `assets/reply.tpl`: `"Fixed �
 
 Pass `-` as a placeholder for `<file_path>` and `<search_pattern>` (ignored with `--skip-verify`, but required for positional parsing):
 ```bash
-./scripts/verify-and-resolve.sh <owner> <repo> <thread_id> - - "<reply_message>" --skip-verify
+${SKILL_DIR}/scripts/verify-and-resolve.sh <owner> <repo> <thread_id> - - "<reply_message>" --skip-verify
 ```
 
 **Parallel execution:** Use multiple parallel Bash tool calls to run verify-and-resolve concurrently. If one call fails, retry it individually after the batch completes.
@@ -304,7 +314,7 @@ Verifying fixes in files...
 
 ## Error Handling
 
-Run `./scripts/<script>.sh --help` for full exit code documentation. Quick reference:
+Run `${SKILL_DIR}/scripts/<script>.sh --help` for full exit code documentation. Quick reference:
 
 | Exit Code | fetch-unresolved.sh | verify-and-resolve.sh |
 |-----------|--------------------|-----------------------|

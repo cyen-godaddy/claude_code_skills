@@ -44,9 +44,26 @@ ESS_PASS=$(jq -r ".$CLUSTER.ingestion_user_password" ~/essp_creds)
 ESS_AUTH="$(jq -r ".$CLUSTER.ingestion_user" ~/essp_creds):$ESS_PASS"
 ```
 
-## Systematic Error Investigation
+## Preferred Approach: Use ess-query.sh
 
-Follow this order — do NOT skip steps:
+**ALWAYS use the `ess-query.sh` helper script first** instead of manual curl commands. It handles credentials, index selection, and output formatting automatically:
+
+```bash
+~/.claude/skills/ess-error-search/ess-query.sh <cluster> <service|nginx> <hours> <pattern>
+```
+
+Examples:
+```bash
+~/.claude/skills/ess-error-search/ess-query.sh valuation nginx 6 500,502,503,504
+~/.claude/skills/ess-error-search/ess-query.sh valuation valuation-api 6 ERROR
+~/.claude/skills/ess-error-search/ess-query.sh atlas ans-auth 1 timeout
+```
+
+Only fall back to manual curl commands if the script doesn't support your specific query (e.g., custom aggregations, field mapping checks).
+
+## Manual Investigation (Fallback)
+
+If `ess-query.sh` is insufficient, follow this order — do NOT skip steps:
 
 1. **List indices** to find correct index pattern
 2. **Sample docs** (size=3) to discover field names
@@ -166,15 +183,15 @@ curl -s -u "$ESS_AUTH" "$ESS_URL/.ds-logs-gdelastic.firehose-prod*/_search" -H '
 | `cluster-autoscaler` | K8s autoscaler (infra, usually noise) |
 | `cloudwatch-agent` | Metrics collection (infra, usually noise) |
 
-## Helper Script
+## Helper Script Reference
 
-Use `ess-query.sh` for quick lookups (reads `~/essp_creds` by default):
+`ess-query.sh` is located at `~/.claude/skills/ess-error-search/ess-query.sh` and reads `~/essp_creds` by default:
 
 ```bash
-./ess-query.sh valuation nginx 24 502          # Valuation nginx 502s, last 24h
-./ess-query.sh valuation valuation-api 24 ERROR # Valuation app errors, last 24h
-./ess-query.sh atlas ans-auth 1 timeout         # Atlas-AI auth timeouts, last 1h
-./ess-query.sh atlas '*' 24 ERROR               # Atlas-AI all services, last 24h
+~/.claude/skills/ess-error-search/ess-query.sh valuation nginx 24 502          # Valuation nginx 502s, last 24h
+~/.claude/skills/ess-error-search/ess-query.sh valuation valuation-api 24 ERROR # Valuation app errors, last 24h
+~/.claude/skills/ess-error-search/ess-query.sh atlas ans-auth 1 timeout         # Atlas-AI auth timeouts, last 1h
+~/.claude/skills/ess-error-search/ess-query.sh atlas '*' 24 ERROR               # Atlas-AI all services, last 24h
 ```
 
 ## Troubleshooting
