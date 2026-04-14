@@ -1,38 +1,48 @@
 #!/bin/bash
 # ESS Error Search Helper
 # Usage: ./ess-query.sh [cluster] [service|index] [hours] [pattern]
-#   cluster: valuation, atlas, or any key in ~/essp_creds (default: valuation)
-#   service: container name, index pattern, or '*' for all (default: valuation-api)
+#   cluster: Name that maps to ~/essp_creds_<cluster> (default: atlas)
+#            e.g., "atlas" reads ~/essp_creds_atlas, "valuation" reads ~/essp_creds_valuation
+#   service: container name, index pattern, or '*' for all (default: ans-registry-poc)
 #   hours: lookback period (default: 24)
 #   pattern: error pattern to search (default: ERROR)
 #
+# Credential files are flat JSON (no nesting):
+#   { "ingestion_url": "...", "ingestion_user": "...", "ingestion_user_password": "...", ... }
+#
+# Override with CREDS_FILE env var to use a specific file.
+#
 # Examples:
+#   ./ess-query.sh atlas ans-auth 1 timeout
 #   ./ess-query.sh valuation valuation-api 24 ERROR
 #   ./ess-query.sh valuation nginx 24 502
-#   ./ess-query.sh atlas ans-auth 1 timeout
+#   CREDS_FILE=~/my-creds.json ./ess-query.sh atlas ans-auth 1 ERROR
 
 set -euo pipefail
 
-CREDS_FILE="${CREDS_FILE:-$HOME/essp_creds}"
-if [[ ! -f "$CREDS_FILE" ]]; then
-    echo "Error: Credentials file not found at $CREDS_FILE" >&2
-    echo "Set CREDS_FILE env var or create ~/essp_creds" >&2
-    exit 1
-fi
-
-CLUSTER="${1:-valuation}"
-SERVICE="${2:-valuation-api}"
+CLUSTER="${1:-atlas}"
+SERVICE="${2:-ans-registry-poc}"
 HOURS="${3:-24}"
 PATTERN="${4:-ERROR}"
 
-# Read credentials for the specified cluster
-ESS_URL=$(jq -r ".$CLUSTER.ingestion_url" "$CREDS_FILE")
-ESS_USER=$(jq -r ".$CLUSTER.ingestion_user" "$CREDS_FILE")
-ESS_PASS=$(jq -r ".$CLUSTER.ingestion_user_password" "$CREDS_FILE")
+# Resolve credentials file: CREDS_FILE env var > ~/essp_creds_<cluster>
+if [[ -z "${CREDS_FILE:-}" ]]; then
+    CREDS_FILE="$HOME/essp_creds_${CLUSTER}"
+fi
+
+if [[ ! -f "$CREDS_FILE" ]]; then
+    echo "Error: Credentials file not found at $CREDS_FILE" >&2
+    echo "Expected ~/essp_creds_${CLUSTER} or set CREDS_FILE env var" >&2
+    exit 1
+fi
+
+# Read credentials (flat JSON, no cluster key nesting)
+ESS_URL=$(jq -r ".ingestion_url" "$CREDS_FILE")
+ESS_USER=$(jq -r ".ingestion_user" "$CREDS_FILE")
+ESS_PASS=$(jq -r ".ingestion_user_password" "$CREDS_FILE")
 
 if [[ "$ESS_URL" == "null" || "$ESS_PASS" == "null" ]]; then
-    echo "Error: Cluster '$CLUSTER' not found in $CREDS_FILE" >&2
-    echo "Available clusters: $(jq -r 'keys[]' "$CREDS_FILE" | tr '\n' ' ')" >&2
+    echo "Error: Missing ingestion_url or ingestion_user_password in $CREDS_FILE" >&2
     exit 1
 fi
 

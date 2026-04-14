@@ -11,37 +11,42 @@ Query Elastic Cloud (ESSP) clusters to find service errors and exceptions. Multi
 
 ## Clusters
 
-| Cluster | Key in `~/essp_creds` | Services |
-|---------|----------------------|----------|
-| **Valuation** | `valuation` | valuation-api, valuation-proxy, rate-limiter, valuation-auth, valuation-batch |
-| **Atlas-AI** | `atlas` | ans-registry-poc, ans-auth, agent2agent |
+| Cluster | Creds File | Services |
+|---------|------------|----------|
+| **Valuation** | `~/essp_creds_valuation` | valuation-api, valuation-proxy, rate-limiter, valuation-auth, valuation-batch |
+| **Atlas-AI** | `~/essp_creds_atlas` | ans-registry-poc, ans-auth, agent2agent |
 
 ## Credentials
 
-Stored in `~/essp_creds` as a multi-account JSON keyed by cluster name:
+Each cluster has its own flat JSON file at `~/essp_creds_<cluster>`:
 
 ```json
 {
-  "valuation": { "ingestion_url": "...", "ingestion_user": "admin", "ingestion_user_password": "..." },
-  "atlas": { "ingestion_url": "...", "ingestion_user": "admin", "ingestion_user_password": "..." }
+  "essp_id": "<essp-deployment-id>",
+  "deployment_id": "<cloud-deployment-id>",
+  "ingestion_user": "admin",
+  "ingestion_user_password": "<password>",
+  "ingestion_url": "https://<es-host>.es.us-west-2.aws.found.io:9243",
+  "ingestion_host": "<es-host>.es.us-west-2.aws.found.io",
+  "ingestion_port": 9243,
+  "kibana_url": "https://<kibana-host>.kb.us-west-2.aws.found.io:9243"
 }
 ```
 
-### Adding a New Account
+### Adding a New Cluster
 
 ```bash
-# Fetch from AWS Secrets Manager and merge into ~/essp_creds
-NEW_CREDS=$(aws secretsmanager get-secret-value --secret-id essp_deployment_credentials --query SecretString --output text)
-jq --argjson new "$NEW_CREDS" '.new_cluster_name = $new' ~/essp_creds > /tmp/essp_creds && mv /tmp/essp_creds ~/essp_creds
+# Fetch from AWS Secrets Manager and save as ~/essp_creds_<cluster>
+aws secretsmanager get-secret-value --secret-id essp_deployment_credentials --query SecretString --output text > ~/essp_creds_<cluster>
 ```
 
 ### Reading Credentials
 
 ```bash
-CLUSTER="valuation"
-ESS_URL=$(jq -r ".$CLUSTER.ingestion_url" ~/essp_creds)
-ESS_PASS=$(jq -r ".$CLUSTER.ingestion_user_password" ~/essp_creds)
-ESS_AUTH="$(jq -r ".$CLUSTER.ingestion_user" ~/essp_creds):$ESS_PASS"
+CREDS_FILE=~/essp_creds_atlas
+ESS_URL=$(jq -r ".ingestion_url" "$CREDS_FILE")
+ESS_PASS=$(jq -r ".ingestion_user_password" "$CREDS_FILE")
+ESS_AUTH="$(jq -r ".ingestion_user" "$CREDS_FILE"):$ESS_PASS"
 ```
 
 ## Preferred Approach: Use ess-query.sh
@@ -51,6 +56,8 @@ ESS_AUTH="$(jq -r ".$CLUSTER.ingestion_user" ~/essp_creds):$ESS_PASS"
 ```bash
 ~/.claude/skills/ess-error-search/ess-query.sh <cluster> <service|nginx> <hours> <pattern>
 ```
+
+The `cluster` argument maps to `~/essp_creds_<cluster>`. Override with `CREDS_FILE` env var.
 
 Examples:
 ```bash
@@ -185,7 +192,7 @@ curl -s -u "$ESS_AUTH" "$ESS_URL/.ds-logs-gdelastic.firehose-prod*/_search" -H '
 
 ## Helper Script Reference
 
-`ess-query.sh` is located at `~/.claude/skills/ess-error-search/ess-query.sh` and reads `~/essp_creds` by default:
+`ess-query.sh` is located at `~/.claude/skills/ess-error-search/ess-query.sh` and reads `~/essp_creds_<cluster>` by default:
 
 ```bash
 ~/.claude/skills/ess-error-search/ess-query.sh valuation nginx 24 502          # Valuation nginx 502s, last 24h
@@ -199,7 +206,7 @@ curl -s -u "$ESS_AUTH" "$ESS_URL/.ds-logs-gdelastic.firehose-prod*/_search" -H '
 | Symptom | Fix |
 |---------|-----|
 | No results | Check index name with `_cat/indices`, verify time range, broaden query |
-| Auth failed | Check `~/essp_creds` has correct cluster key; re-fetch from Secrets Manager if password rotated |
+| Auth failed | Check `~/essp_creds_<cluster>` exists and has correct credentials; re-fetch from Secrets Manager if password rotated |
 | Slow queries | Add time range filter, use specific index (not wildcard), reduce `size` |
 | 0 shards searched | Index pattern doesn't match any indices — list indices first |
 | Empty aggregation buckets | Field type mismatch — check `_mapping/field/FIELDNAME` |
