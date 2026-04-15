@@ -36,27 +36,45 @@ Common values (merged automatically):
 
 ## Deployment Commands
 
+### Prerequisites
+1. Assume the correct deploy role for the target environment:
+   ```bash
+   eval "$(python3 ~/.aws/aws-role assume valdev)"    # dev
+   eval "$(python3 ~/.aws/aws-role assume valtest)"   # test
+   eval "$(python3 ~/.aws/aws-role assume valprod)"   # prod
+   ```
+   Verify with: `aws sts get-caller-identity`
+
+2. Switch to the target kube context:
+   ```bash
+   aws eks update-kubeconfig --name valuation-int-green --region us-west-2
+   aws eks update-kubeconfig --name valuation-pub-green --region us-west-2
+   aws eks update-kubeconfig --name valuation-int-green --region us-east-1
+   aws eks update-kubeconfig --name valuation-pub-green --region us-east-1
+   ```
+
 ### Single Resource
-Always check the AWS context is correct, run `aws sts get-caller-identity` If not, run valdev, valtest, valprod to assume the Deploy role.
-Always switch to the target context before running deploy-single.sh or the script will fail.
-For example:
+IMPORTANT: `deploy-single.sh` must be run from the `templates/` directory. All paths are relative to `templates/`.
 
-```
-aws eks update-kubeconfig --name valuation-int-green --region us-west-2
-aws eks update-kubeconfig --name valuation-pub-green --region us-west-2
-aws eks update-kubeconfig --name valuation-int-green --region us-east-1
-aws eks update-kubeconfig --name valuation-pub-green --region us-east-1
-```
-
+IMPORTANT: Deploys to multiple clusters MUST be sequential, not parallel. `aws eks update-kubeconfig` mutates the shared `~/.kube/config` and `deploy-single.sh` checks `kubectl config current-context`, so parallel runs will race on the context.
 
 ```bash
-./templates/deploy-single.sh templates/values-{env}-{region}-{type}-green.yaml {context_arn} templates/{phase}/{resource}.yaml
+cd templates/
+./deploy-single.sh {values-file} {context_arn} {phase}/{resource}.yaml
+```
+
+Example:
+```bash
+cd templates/
+./deploy-single.sh values-test-uswest-int-green.yaml arn:aws:eks:us-west-2:759135530883:cluster/valuation-int-green 1/valuation-proxy-cm.yaml
 ```
 
 Dry run (add `-d`):
 ```bash
-./templates/deploy-single.sh templates/values-{env}-{region}-{type}-green.yaml {context_arn} templates/{phase}/{resource}.yaml -d
+./deploy-single.sh {values-file} {context_arn} {phase}/{resource}.yaml -d
 ```
+## kubectl
+Once the kube context is set, you have access to kubectl tool
 
 ## Deployment Phases (Order Matters)
 
